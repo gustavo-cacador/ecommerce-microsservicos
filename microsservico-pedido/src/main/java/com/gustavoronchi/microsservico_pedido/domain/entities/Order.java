@@ -1,4 +1,4 @@
-package com.gustavoronchi.microsservico_pedido.database.model;
+package com.gustavoronchi.microsservico_pedido.domain.entities;
 
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import jakarta.persistence.*;

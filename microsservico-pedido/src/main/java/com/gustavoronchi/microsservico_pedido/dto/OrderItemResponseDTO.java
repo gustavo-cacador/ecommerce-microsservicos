@@ -1,6 +1,6 @@
 package com.gustavoronchi.microsservico_pedido.dto;
 
-import com.gustavoronchi.microsservico_pedido.database.model.OrderItem;
+import com.gustavoronchi.microsservico_pedido.domain.entities.OrderItem;
 
 import java.math.BigDecimal;
 import java.util.UUID;
