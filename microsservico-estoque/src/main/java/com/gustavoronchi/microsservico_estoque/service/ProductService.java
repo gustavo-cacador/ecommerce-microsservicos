@@ -1,6 +1,6 @@
 package com.gustavoronchi.microsservico_estoque.service;
 
-import com.gustavoronchi.microsservico_estoque.ProductNotFoundException;
+import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
 import com.gustavoronchi.microsservico_estoque.dto.ProductRequestDTO;
