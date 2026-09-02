@@ -1,9 +1,12 @@
 package com.gustavoronchi.microsservico_pedido.dto;
 
+import com.gustavoronchi.microsservico_pedido.database.model.Order;
+import com.gustavoronchi.microsservico_pedido.database.model.OrderItem;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -14,7 +17,7 @@ public class OrderResponseDTO {
     private StatusOrder status;
     private BigDecimal totalValue;
     private Instant createdAt;
-    private List<OrderItemResponseDTO> items;
+    private List<OrderItemResponseDTO> items = new ArrayList<>();
 
     public OrderResponseDTO() {
     }
@@ -26,6 +29,17 @@ public class OrderResponseDTO {
         this.totalValue = totalValue;
         this.createdAt = createdAt;
         this.items = items;
+    }
+
+    public OrderResponseDTO(Order order) {
+        this.orderId = order.getId();
+        this.clientId = order.getClientId();
+        this.status = order.getStatus();
+        this.totalValue = order.getTotalValue();
+        this.createdAt = order.getCreatedAt();
+        this.items = order.getItems().stream()
+                .map(OrderItemResponseDTO::new)
+                .toList();
     }
 
     public UUID getOrderId() {
