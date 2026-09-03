@@ -1,5 +1,6 @@
 package com.gustavoronchi.microsservico_pedido.service;
 
+import com.gustavoronchi.microsservico_pedido.client.ProductResponseDTO;
 import com.gustavoronchi.microsservico_pedido.client.StockClient;
 import com.gustavoronchi.microsservico_pedido.client.StockItemRequestDTO;
 import com.gustavoronchi.microsservico_pedido.client.StockReserveResponseDTO;
@@ -41,7 +42,6 @@ public class OrderService {
 
     @Transactional
     public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
-
         List<StockItemRequestDTO> itensParaReservar = orderRequestDTO.getItems().stream()
                 .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
                 .toList();
@@ -68,7 +68,10 @@ public class OrderService {
             orderItem.setOrder(order);
             orderItem.setProductId(itemRequestDTO.getProductId());
             orderItem.setQuantity(itemRequestDTO.getQuantity());
-            orderItem.setPrice(BigDecimal.ZERO); // preço vira do serviço de estoque
+
+            ProductResponseDTO produto = stockClient.searchProduct(itemRequestDTO.getProductId());
+            orderItem.setPrice(produto.getPrice());
+
             order.getItems().add(orderItem);
         }
 

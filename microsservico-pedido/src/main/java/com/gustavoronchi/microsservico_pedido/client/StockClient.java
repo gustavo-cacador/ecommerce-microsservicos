@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
 import java.util.List;
+import java.util.UUID;
 
 @Component
 public class StockClient {
@@ -29,5 +30,12 @@ public class StockClient {
                 .body(itens)
                 .retrieve()
                 .toBodilessEntity();
+    }
+
+    public ProductResponseDTO searchProduct(UUID productId) {
+        return restClient.get()
+                .uri("/products/{id}", productId)
+                .retrieve()
+                .body(ProductResponseDTO.class);
     }
 }
