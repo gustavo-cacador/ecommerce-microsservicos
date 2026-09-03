@@ -11,7 +11,6 @@ public class OrderItemResponseDTO {
     private Integer quantity;
     private BigDecimal unitValue;
     private BigDecimal totalValue;
-    private BigDecimal price;
 
     public OrderItemResponseDTO() {
 }
@@ -21,14 +20,13 @@ public class OrderItemResponseDTO {
         this.quantity = quantity;
         this.unitValue = unitValue;
         this.totalValue = totalValue;
-        this.price = price;
     }
 
     public OrderItemResponseDTO(OrderItem item) {
         this.productId = item.getProductId();
         this.quantity = item.getQuantity();
-        this.price = item.getPrice();
         this.totalValue = item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+        this.unitValue = item.getPrice();
     }
 
     public UUID getProductId() {
@@ -61,13 +59,5 @@ public class OrderItemResponseDTO {
 
     public void setTotalValue(BigDecimal totalValue) {
         this.totalValue = totalValue;
-    }
-
-    public BigDecimal getPrice() {
-        return price;
-    }
-
-    public void setPrice(BigDecimal price) {
-        this.price = price;
     }
 }
