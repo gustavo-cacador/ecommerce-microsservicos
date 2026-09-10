@@ -2,12 +2,14 @@ package com.gustavoronchi.microsservico_estoque.service;
 
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
+import com.gustavoronchi.microsservico_estoque.dto.ReservedItemDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemResponseDTO;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -21,8 +23,10 @@ public class StockService {
 
     @Transactional
     public StockItemResponseDTO reserve(List<StockItemRequestDTO> itens) {
+        List<Product> blockedProducts = new ArrayList<>();
+
         for (StockItemRequestDTO item : itens) {
-            Product product = productRepository.findById(item.getProductId()).orElse(null);
+            Product product = productRepository.findByIdForUpdate(item.getProductId()).orElse(null);
 
             if (product == null) {
                 return new StockItemResponseDTO(false, "Produto não encontrado: " + item.getProductId());
@@ -32,19 +36,23 @@ public class StockService {
             if (disponivel < item.getQuantity()) {
                 return new StockItemResponseDTO(false, "Estoque insuficiente para o produto " + product.getName());
             }
+
+            blockedProducts.add(product);
         }
 
-        try {
-            for (StockItemRequestDTO item : itens) {
-                Product product = productRepository.findById(item.getProductId()).orElseThrow();
-                product.setQuantityReserved(product.getQuantityReserved() + item.getQuantity());
-                productRepository.save(product);
-            }
-        } catch (OptimisticLockingFailureException ex) {
-            return new StockItemResponseDTO(false, "Conflito de concorrência ao reservar estoque, tente novamente.");
+        List<ReservedItemDTO> reservedItems = new ArrayList<>();
+
+        for (int i = 0; i < itens.size(); i++) {
+            StockItemRequestDTO itemRequest = itens.get(i);
+            Product product = blockedProducts.get(i);
+
+            product.setQuantityReserved(product.getQuantityReserved() + itemRequest.getQuantity());
+            productRepository.save(product);
+
+            reservedItems.add(new ReservedItemDTO(product.getId(), product.getPrice()));
         }
 
-        return new StockItemResponseDTO(true, null);
+        return new StockItemResponseDTO(true, null, reservedItems);
     }
 
     @Transactional
