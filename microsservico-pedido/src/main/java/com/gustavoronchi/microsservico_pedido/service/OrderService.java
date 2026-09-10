@@ -10,6 +10,8 @@ import com.gustavoronchi.microsservico_pedido.dto.OrderResponseDTO;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClientException;
@@ -26,6 +28,7 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final StockClient stockClient;
+    private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
     public OrderService(OrderRepository orderRepository, StockClient stockClient) {
         this.orderRepository = orderRepository;
@@ -41,22 +44,27 @@ public class OrderService {
 
     @Transactional
     public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
+        // mapeia os itens solicitados para o dto de reserva do estoque
         List<StockItemRequestDTO> itemToReserve = orderRequestDTO.getItems()
                 .stream()
                 .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
                 .toList();
 
         StockReserveResponseDTO resposta;
+
+        // tenta contatar o serviço de estoque via http
         try {
             resposta = stockClient.reserve(itemToReserve);
         } catch (RestClientException ex) {
             throw new StockUnavailableException("Não foi possível contatar o serviço de estoque: " + ex.getMessage());
         }
 
+        // valida se a reserva foi autorizada pelo estoque
         if (!resposta.isSuccess()) {
             throw new StockUnavailableException(resposta.getFailureReason());
         }
 
+        // inicio da transação do pedido (com tratamento saga)
         try {
             Map<UUID, BigDecimal> pricesByProduct = resposta.getItems().stream()
                     .collect(Collectors.toMap(ReservedItemDTO::getProductId, ReservedItemDTO::getPrice));
@@ -87,8 +95,16 @@ public class OrderService {
             return new OrderResponseDTO(createdOrder);
 
         } catch (Exception ex) {
-            stockClient.release(itemToReserve);
-            throw ex;
+            log.error("Erro interno ao criar pedido. Tentando acionar rollback de estoque...", ex);
+
+            try {
+                stockClient.release(itemToReserve);
+                log.info("Rollback de estoque concluído com sucesso.");
+            } catch (Exception releaseEx) {
+                log.error("FALHA GRAVE: Não foi possível realizar o rollback do estoque! " +
+                        "Os itens podem ter ficado presos. Erro do release: {}", releaseEx.getMessage());
+            }
+            throw new RuntimeException("Erro ao processar pedido. A transação foi revertida.", ex);
         }
     }
 }
