@@ -1,9 +1,6 @@
 package com.gustavoronchi.microsservico_pedido.service;
 
-import com.gustavoronchi.microsservico_pedido.client.ProductResponseDTO;
-import com.gustavoronchi.microsservico_pedido.client.StockClient;
-import com.gustavoronchi.microsservico_pedido.client.StockItemRequestDTO;
-import com.gustavoronchi.microsservico_pedido.client.StockReserveResponseDTO;
+import com.gustavoronchi.microsservico_pedido.client.*;
 import com.gustavoronchi.microsservico_pedido.domain.entities.Order;
 import com.gustavoronchi.microsservico_pedido.domain.entities.OrderItem;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OrderRepository;
@@ -20,7 +17,9 @@ import org.springframework.web.client.RestClientException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class OrderService {
@@ -42,13 +41,14 @@ public class OrderService {
 
     @Transactional
     public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
-        List<StockItemRequestDTO> itensParaReservar = orderRequestDTO.getItems().stream()
+        List<StockItemRequestDTO> itemToReserve = orderRequestDTO.getItems()
+                .stream()
                 .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
                 .toList();
 
         StockReserveResponseDTO resposta;
         try {
-            resposta = stockClient.reserve(itensParaReservar);
+            resposta = stockClient.reserve(itemToReserve);
         } catch (RestClientException ex) {
             throw new StockUnavailableException("Não foi possível contatar o serviço de estoque: " + ex.getMessage());
         }
@@ -57,30 +57,38 @@ public class OrderService {
             throw new StockUnavailableException(resposta.getFailureReason());
         }
 
-        Order order = new Order();
-        order.setClientId(orderRequestDTO.getClientId());
-        order.setStatus(StatusOrder.WAITING_PAYMENT);
-        order.setCreatedAt(Instant.now());
-        order.setUpdatedAt(Instant.now());
+        try {
+            Map<UUID, BigDecimal> pricesByProduct = resposta.getItems().stream()
+                    .collect(Collectors.toMap(ReservedItemDTO::getProductId, ReservedItemDTO::getPrice));
 
-        for (OrderItemRequestDTO itemRequestDTO : orderRequestDTO.getItems()) {
-            OrderItem orderItem = new OrderItem();
-            orderItem.setOrder(order);
-            orderItem.setProductId(itemRequestDTO.getProductId());
-            orderItem.setQuantity(itemRequestDTO.getQuantity());
+            Order order = new Order();
+            order.setClientId(orderRequestDTO.getClientId());
+            order.setStatus(StatusOrder.WAITING_PAYMENT);
+            order.setCreatedAt(Instant.now());
+            order.setUpdatedAt(Instant.now());
 
-            ProductResponseDTO produto = stockClient.searchProduct(itemRequestDTO.getProductId());
-            orderItem.setPrice(produto.getPrice());
+            for (OrderItemRequestDTO itemRequestDTO : orderRequestDTO.getItems()) {
+                OrderItem orderItem = new OrderItem();
+                orderItem.setOrder(order);
+                orderItem.setProductId(itemRequestDTO.getProductId());
+                orderItem.setQuantity(itemRequestDTO.getQuantity());
+                orderItem.setPrice(pricesByProduct.get(itemRequestDTO.getProductId()));
+                order.getItems().add(orderItem);
+            }
 
-            order.getItems().add(orderItem);
+            BigDecimal total = order.getItems()
+                    .stream()
+                    .map(item -> item.getPrice()
+                            .multiply(BigDecimal.valueOf(item.getQuantity())))
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            order.setTotalValue(total);
+
+            Order createdOrder = orderRepository.save(order);
+            return new OrderResponseDTO(createdOrder);
+
+        } catch (Exception ex) {
+            stockClient.release(itemToReserve);
+            throw ex;
         }
-
-        BigDecimal total = order.getItems().stream()
-                .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        order.setTotalValue(total);
-
-        Order createdOrder = orderRepository.save(order);
-        return new OrderResponseDTO(createdOrder);
     }
 }

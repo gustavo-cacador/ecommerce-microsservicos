@@ -1,9 +1,13 @@
 package com.gustavoronchi.microsservico_pedido.client;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class StockReserveResponseDTO {
 
     private boolean success;
     private String failureReason;
+    private List<ReservedItemDTO> items = new ArrayList<>();
 
     public StockReserveResponseDTO() {
     }
@@ -22,5 +26,13 @@ public class StockReserveResponseDTO {
 
     public void setFailureReason(String failureReason) {
         this.failureReason = failureReason;
+    }
+
+    public List<ReservedItemDTO> getItems() {
+        return items;
+    }
+
+    public void setItems(List<ReservedItemDTO> items) {
+        this.items = items;
     }
 }

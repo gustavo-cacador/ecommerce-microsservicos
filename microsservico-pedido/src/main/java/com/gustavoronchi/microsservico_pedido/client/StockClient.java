@@ -32,6 +32,7 @@ public class StockClient {
                 .toBodilessEntity();
     }
 
+    // implementar depois para detalhar produto no frontend chamando pedido-service
     public ProductResponseDTO searchProduct(UUID productId) {
         return restClient.get()
                 .uri("/products/{id}", productId)
