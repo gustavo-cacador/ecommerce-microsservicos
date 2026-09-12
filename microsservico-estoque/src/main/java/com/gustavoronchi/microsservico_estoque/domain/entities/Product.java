@@ -30,10 +30,16 @@ public class Product {
     @Column(nullable = false)
     private Integer quantityReserved = 0;
 
+    @Column(nullable = false)
+    private UUID categoryId;
+
+    @Column(nullable = false)
+    private Boolean active = true;
+
     public Product() {
     }
 
-    public Product(UUID id, String name, String description, BigDecimal price, String imgUrl, Integer quantityAvailable, Integer quantityReserved) {
+    public Product(UUID id, String name, String description, BigDecimal price, String imgUrl, Integer quantityAvailable, Integer quantityReserved, UUID categoryId, Boolean active) {
         this.id = id;
         this.name = name;
         this.description = description;
@@ -41,6 +47,8 @@ public class Product {
         this.imgUrl = imgUrl;
         this.quantityAvailable = quantityAvailable;
         this.quantityReserved = quantityReserved;
+        this.categoryId = categoryId;
+        this.active = active;
     }
 
     public UUID getId() {
@@ -97,6 +105,22 @@ public class Product {
 
     public void setQuantityReserved(Integer quantityReserved) {
         this.quantityReserved = quantityReserved;
+    }
+
+    public UUID getCategoryId() {
+        return categoryId;
+    }
+
+    public void setCategoryId(UUID categoryId) {
+        this.categoryId = categoryId;
+    }
+
+    public Boolean getActive() {
+        return active;
+    }
+
+    public void setActive(Boolean active) {
+        this.active = active;
     }
 
     @Override
