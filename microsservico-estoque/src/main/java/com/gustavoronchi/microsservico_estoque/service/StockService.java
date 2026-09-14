@@ -28,7 +28,7 @@ public class StockService {
         for (StockItemRequestDTO item : itens) {
             Product product = productRepository.findByIdForUpdate(item.getProductId()).orElse(null);
 
-            if (product == null) {
+            if (product == null || !product.getActive()) {
                 return new StockItemResponseDTO(false, "Produto não encontrado: " + item.getProductId());
             }
 

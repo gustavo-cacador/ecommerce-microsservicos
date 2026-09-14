@@ -1,6 +1,7 @@
 package com.gustavoronchi.microsservico_estoque.dto;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 public class ProductRequestDTO {
 
@@ -9,16 +10,18 @@ public class ProductRequestDTO {
     private BigDecimal price;
     private String imgUrl;
     private Integer quantityAvailable;
+    private UUID categoryId;
 
     public ProductRequestDTO() {
     }
 
-    public ProductRequestDTO(String name, String description, BigDecimal price, String imgUrl, Integer quantityAvailable) {
+    public ProductRequestDTO(String name, String description, BigDecimal price, String imgUrl, Integer quantityAvailable, UUID categoryId) {
         this.name = name;
         this.description = description;
         this.price = price;
         this.imgUrl = imgUrl;
         this.quantityAvailable = quantityAvailable;
+        this.categoryId = categoryId;
     }
 
     public String getName() {
@@ -59,5 +62,13 @@ public class ProductRequestDTO {
 
     public void setQuantityAvailable(Integer quantityAvailable) {
         this.quantityAvailable = quantityAvailable;
+    }
+
+    public UUID getCategoryId() {
+        return categoryId;
+    }
+
+    public void setCategoryId(UUID categoryId) {
+        this.categoryId = categoryId;
     }
 }

@@ -14,11 +14,13 @@ public class ProductResponseDTO {
     private String imgUrl;
     private Integer quantityAvailable;
     private Integer quantityReserved;
+    private UUID categoryId;
+    private Boolean active;
 
     public ProductResponseDTO() {
     }
 
-    public ProductResponseDTO(UUID id, String name, String description, BigDecimal price, String imgUrl, Integer quantityAvailable, Integer quantityReserved) {
+    public ProductResponseDTO(UUID id, String name, String description, BigDecimal price, String imgUrl, Integer quantityAvailable, Integer quantityReserved, UUID categoryId, Boolean active) {
         this.id = id;
         this.name = name;
         this.description = description;
@@ -26,16 +28,20 @@ public class ProductResponseDTO {
         this.imgUrl = imgUrl;
         this.quantityAvailable = quantityAvailable;
         this.quantityReserved = quantityReserved;
+        this.categoryId = categoryId;
+        this.active = active;
     }
 
     public ProductResponseDTO(Product product) {
-        this.id = product.getId();
-        this.name = product.getName();
-        this.description = product.getDescription();
-        this.price = product.getPrice();
-        this.imgUrl = product.getImgUrl();
-        this.quantityAvailable = product.getQuantityAvailable();
-        this.quantityReserved = product.getQuantityReserved();
+        id = product.getId();
+        name = product.getName();
+        description = product.getDescription();
+        price = product.getPrice();
+        imgUrl = product.getImgUrl();
+        quantityAvailable = product.getQuantityAvailable();
+        quantityReserved = product.getQuantityReserved();
+        categoryId = product.getCategoryId();
+        active = product.getActive();
     }
 
     public UUID getId() {
@@ -92,5 +98,21 @@ public class ProductResponseDTO {
 
     public void setQuantityReserved(Integer quantityReserved) {
         this.quantityReserved = quantityReserved;
+    }
+
+    public UUID getCategoryId() {
+        return categoryId;
+    }
+
+    public void setCategoryId(UUID categoryId) {
+        this.categoryId = categoryId;
+    }
+
+    public Boolean getActive() {
+        return active;
+    }
+
+    public void setActive(Boolean active) {
+        this.active = active;
     }
 }
