@@ -1,4 +1,4 @@
-package com.gustavoronchi.microsservico_pedido.client;
+package com.gustavoronchi.microsservico_pedido.dto;
 
 import java.util.ArrayList;
 import java.util.List;

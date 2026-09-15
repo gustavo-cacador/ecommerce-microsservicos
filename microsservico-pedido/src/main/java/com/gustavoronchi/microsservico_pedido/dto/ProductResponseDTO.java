@@ -1,4 +1,4 @@
-package com.gustavoronchi.microsservico_pedido.client;
+package com.gustavoronchi.microsservico_pedido.dto;
 
 import java.math.BigDecimal;
 import java.util.UUID;

@@ -1,5 +1,8 @@
 package com.gustavoronchi.microsservico_pedido.client;
 
+import com.gustavoronchi.microsservico_pedido.dto.ProductResponseDTO;
+import com.gustavoronchi.microsservico_pedido.dto.StockItemRequestDTO;
+import com.gustavoronchi.microsservico_pedido.dto.StockReserveResponseDTO;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
