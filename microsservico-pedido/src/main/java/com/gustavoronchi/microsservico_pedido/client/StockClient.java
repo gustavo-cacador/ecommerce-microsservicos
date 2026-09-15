@@ -32,6 +32,14 @@ public class StockClient {
                 .toBodilessEntity();
     }
 
+    public void confirm(List<StockItemRequestDTO> itens) {
+        restClient.post()
+                .uri("/stock/confirm")
+                .body(itens)
+                .retrieve()
+                .toBodilessEntity();
+    }
+
     // implementar depois para detalhar produto no frontend chamando pedido-service
     public ProductResponseDTO searchProduct(UUID productId) {
         return restClient.get()

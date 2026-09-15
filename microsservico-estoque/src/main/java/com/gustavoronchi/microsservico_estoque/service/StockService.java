@@ -65,4 +65,17 @@ public class StockService {
             });
         }
     }
+
+    @Transactional
+    public void confirm(List<StockItemRequestDTO> itens) {
+        for (StockItemRequestDTO item : itens) {
+            productRepository.findById(item.getProductId()).ifPresent(product -> {
+                int novoDisponivel = Math.max(0, product.getQuantityAvailable() - item.getQuantity());
+                int novaReservada = Math.max(0, product.getQuantityReserved() - item.getQuantity());
+                product.setQuantityAvailable(novoDisponivel);
+                product.setQuantityReserved(novaReservada);
+                productRepository.save(product);
+            });
+        }
+    }
 }

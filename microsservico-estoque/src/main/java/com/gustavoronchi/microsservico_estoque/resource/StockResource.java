@@ -8,7 +8,6 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
 import java.util.List;
 
 @RestController
@@ -29,6 +28,12 @@ public class StockResource {
     @PostMapping("release")
     public ResponseEntity<Void> release(@RequestBody List<StockItemRequestDTO> itens) {
         stockService.release(itens);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("confirm")
+    public ResponseEntity<Void> confirm(@RequestBody List<StockItemRequestDTO> itens) {
+        stockService.confirm(itens);
         return ResponseEntity.noContent().build();
     }
 }
