@@ -3,7 +3,6 @@ package com.gustavoronchi.microsservico_pedido.resource;
 import com.gustavoronchi.microsservico_pedido.dto.OrderRequestDTO;
 import com.gustavoronchi.microsservico_pedido.dto.OrderResponseDTO;
 import com.gustavoronchi.microsservico_pedido.service.OrderService;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
