@@ -44,85 +44,33 @@ public class OrderService {
     }
 
     public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
-        // mapeia os itens solicitados para o dto de reserva do estoque
-        List<StockItemRequestDTO> itemToReserve = orderRequestDTO.getItems()
+
+        List<StockItemRequestDTO> itemsToReserve = orderRequestDTO.getItems()
                 .stream()
                 .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
                 .toList();
 
-        StockReserveResponseDTO response;
+        // reserva, se falhar aqui, nada foi comprometido ainda — não precisa compensar.
+        StockReserveResponseDTO stockResponse = reserveStock(itemsToReserve);
 
-        // tenta contatar o serviço de estoque via http
-        try {
-            response = stockClient.reserve(itemToReserve);
-        } catch (RestClientException ex) {
-            throw new StockUnavailableException("Não foi possível contatar o serviço de estoque: " + ex.getMessage());
-        }
-
-        // valida se a reserva foi autorizada pelo estoque
-        if (!response.isSuccess()) {
-            throw new StockUnavailableException(response.getFailureReason());
-        }
-
+        //  monta e salva o pedido, se falhar, o estoque já foi reservado e precisa compensar.
         Order order;
-
-        // inicio da transação do pedido (com tratamento saga)
         try {
-            Map<UUID, BigDecimal> pricesByProduct = response
-                    .getItems()
-                    .stream()
-                    .collect(Collectors.toMap(ReservedItemDTO::getProductId, ReservedItemDTO::getPrice));
-
-            order = new Order();
-            order.setClientId(orderRequestDTO.getClientId());
-            order.setStatus(StatusOrder.WAITING_PAYMENT);
-            order.setCreatedAt(Instant.now());
-            order.setUpdatedAt(Instant.now());
-
-            for (OrderItemRequestDTO itemRequestDTO : orderRequestDTO.getItems()) {
-                OrderItem orderItem = new OrderItem();
-                orderItem.setOrder(order);
-                orderItem.setProductId(itemRequestDTO.getProductId());
-                orderItem.setQuantity(itemRequestDTO.getQuantity());
-                orderItem.setPrice(pricesByProduct.get(itemRequestDTO.getProductId()));
-                order.getItems().add(orderItem);
-            }
-
-            BigDecimal total = order.getItems()
-                    .stream()
-                    .map(item -> item.getPrice()
-                            .multiply(BigDecimal.valueOf(item.getQuantity())))
-                    .reduce(BigDecimal.ZERO, BigDecimal::add);
-            order.setTotalValue(total);
-
-            order = orderRepository.save(order);
-
+            order = createOrderEntity(orderRequestDTO, stockResponse);
         } catch (Exception ex) {
-            log.error("Erro interno ao criar pedido. Tentando acionar rollback de estoque...", ex);
-
-            try {
-                stockClient.release(itemToReserve);
-                log.info("Rollback de estoque concluído com sucesso.");
-            } catch (Exception releaseEx) {
-                log.error("FALHA GRAVE: Não foi possível realizar o rollback do estoque! " +
-                        "Os itens podem ter ficado presos. Erro do release: {}", releaseEx.getMessage());
-            }
-            throw new RuntimeException("Erro ao processar pedido. A transação foi revertida.", ex);
+            log.error("Erro ao montar/salvar pedido. Revertendo reserva de estoque...", ex);
+            releaseStock(itemsToReserve, null);
+            throw new RuntimeException("Erro ao processar pedido. A reserva de estoque foi revertida.", ex);
         }
 
+        // processa o pagamento.
         PaymentResponseDTO paymentResponse;
         try {
             paymentResponse = paymentClient.process(new PaymentRequestDTO(order.getId(), order.getTotalValue()));
         } catch (RestClientException ex) {
-            log.error("Erro ao contatar serviço de pagamento. Revertendo estoque e marcando pedido como recusado.", ex);
+            log.error("Erro ao contatar serviço de pagamento para o pedido {}", order.getId(), ex);
 
-            try {
-                stockClient.release(itemToReserve);
-                log.info("Rollback de estoque concluído com sucesso.");
-            } catch (Exception releaseEx) {
-                log.error("FALHA GRAVE: Não foi possível realizar o rollback do estoque! " +
-                        "Os itens podem ter ficado presos. Erro do release: {}", releaseEx.getMessage());
-            }
+            releaseStock(itemsToReserve, order.getId());
 
             order.setStatus(StatusOrder.DECLINED_PAYMENT);
             order.setUpdatedAt(Instant.now());
@@ -131,17 +79,92 @@ public class OrderService {
             throw new PaymentUnavailableException("Não foi possível contatar o serviço de pagamento: " + ex.getMessage());
         }
 
+        // resultado do pagamento já é definitivo
         if ("APPROVED".equals(paymentResponse.getStatus())) {
             order.setStatus(StatusOrder.PAID);
-            stockClient.confirm(itemToReserve);
+            confirmStock(itemsToReserve, order.getId());
         } else {
             order.setStatus(StatusOrder.DECLINED_PAYMENT);
-            stockClient.release(itemToReserve);
+            releaseStock(itemsToReserve, order.getId());
         }
 
         order.setUpdatedAt(Instant.now());
-        Order createdOrder = orderRepository.save(order);
+        Order updatedOrder = orderRepository.save(order);
 
-        return new OrderResponseDTO(createdOrder);
+        return new OrderResponseDTO(updatedOrder);
+    }
+
+    private StockReserveResponseDTO reserveStock(List<StockItemRequestDTO> itemsToReserve) {
+        try {
+            StockReserveResponseDTO response = stockClient.reserve(itemsToReserve);
+
+            if (!response.isSuccess()) {
+                throw new StockUnavailableException(response.getFailureReason());
+            }
+
+            return response;
+
+        } catch (RestClientException ex) {
+            throw new StockUnavailableException("Não foi possível contatar o serviço de estoque: " + ex.getMessage());
+        }
+    }
+
+    private Order createOrderEntity(OrderRequestDTO orderRequestDTO, StockReserveResponseDTO stockResponse) {
+        Map<UUID, BigDecimal> pricesByProduct = stockResponse
+                .getItems()
+                .stream()
+                .collect(Collectors.toMap(ReservedItemDTO::getProductId, ReservedItemDTO::getPrice));
+
+        Order order = new Order();
+        order.setClientId(orderRequestDTO.getClientId());
+        order.setStatus(StatusOrder.WAITING_PAYMENT);
+        order.setCreatedAt(Instant.now());
+        order.setUpdatedAt(Instant.now());
+
+        for (OrderItemRequestDTO itemRequestDTO : orderRequestDTO.getItems()) {
+            BigDecimal price = pricesByProduct.get(itemRequestDTO.getProductId());
+
+            if (price == null) {
+                throw new IllegalStateException(
+                        "Estoque não retornou preço para o produto " + itemRequestDTO.getProductId() +
+                                " — resposta de reserva inconsistente."
+                );
+            }
+
+            OrderItem orderItem = new OrderItem();
+            orderItem.setOrder(order);
+            orderItem.setProductId(itemRequestDTO.getProductId());
+            orderItem.setQuantity(itemRequestDTO.getQuantity());
+            orderItem.setPrice(price);
+            order.getItems().add(orderItem);
+        }
+
+        BigDecimal total = order.getItems()
+                .stream()
+                .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        order.setTotalValue(total);
+
+        return orderRepository.save(order);
+    }
+
+    private void releaseStock(List<StockItemRequestDTO> items, UUID orderId) {
+        try {
+            stockClient.release(items);
+            log.info("Reserva de estoque liberada com sucesso para o pedido {}.", orderId);
+        } catch (Exception ex) {
+            log.error("FALHA GRAVE: não foi possível liberar a reserva de estoque do pedido {}. " +
+                    "Os itens podem ter ficado presos. Requer reconciliação.", orderId, ex);
+        }
+    }
+
+    private void confirmStock(List<StockItemRequestDTO> items, UUID orderId) {
+        try {
+            stockClient.confirm(items);
+            log.info("Estoque confirmado com sucesso para o pedido {}.", orderId);
+        } catch (Exception ex) {
+            log.error("FALHA GRAVE: pagamento aprovado, mas não foi possível confirmar o estoque do pedido {}. " +
+                    "Requer reconciliação.", orderId, ex);
+        }
     }
 }
