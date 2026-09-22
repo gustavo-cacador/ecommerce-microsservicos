@@ -11,6 +11,8 @@ import com.gustavoronchi.microsservico_pedido.exception.PaymentUnavailableExcept
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClientException;
@@ -41,6 +43,22 @@ public class OrderService {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + id + " não encontrado."));
         return new OrderResponseDTO(order);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<OrderResponseDTO> findAll(Pageable pageable) {
+        return orderRepository.findAll(pageable)
+                .map(OrderResponseDTO::new);
+    }
+
+    @Transactional
+    public OrderResponseDTO updateStatus(UUID id, StatusOrder newStatus) {
+        Order order = orderRepository.findById(id)
+                .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + id + " não encontrado."));
+        order.setStatus(newStatus);
+        order.setUpdatedAt(Instant.now());
+        Order updated = orderRepository.save(order);
+        return new OrderResponseDTO(updated);
     }
 
     public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
