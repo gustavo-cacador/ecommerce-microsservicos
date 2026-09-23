@@ -9,6 +9,7 @@ import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.exception.PaymentUnavailableException;
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
+import com.gustavoronchi.microsservico_pedido.messaging.StockEventPublisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
@@ -30,12 +31,15 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final StockClient stockClient;
     private final PaymentClient paymentClient;
+    private final StockEventPublisher stockEventPublisher;
+
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
-    public OrderService(OrderRepository orderRepository, StockClient stockClient, PaymentClient paymentClient) {
+    public OrderService(OrderRepository orderRepository, StockClient stockClient, PaymentClient paymentClient, StockEventPublisher stockEventPublisher) {
         this.orderRepository = orderRepository;
         this.stockClient = stockClient;
         this.paymentClient = paymentClient;
+        this.stockEventPublisher = stockEventPublisher;
     }
 
     @Transactional(readOnly = true)
@@ -168,21 +172,21 @@ public class OrderService {
 
     private void releaseStock(List<StockItemRequestDTO> items, UUID orderId) {
         try {
-            stockClient.release(items);
-            log.info("Reserva de estoque liberada com sucesso para o pedido {}.", orderId);
+            stockEventPublisher.publishRelease(orderId, items);
+            log.info("Evento de liberação de estoque publicado para o pedido {}.", orderId);
         } catch (Exception ex) {
-            log.error("FALHA GRAVE: não foi possível liberar a reserva de estoque do pedido {}. " +
-                    "Os itens podem ter ficado presos. Requer reconciliação.", orderId, ex);
+            log.error("FALHA GRAVE: não foi possível publicar evento de liberação de estoque " + " para o pedido {}. Requer reconciliação manual.",
+                    orderId, ex);
         }
     }
 
     private void confirmStock(List<StockItemRequestDTO> items, UUID orderId) {
         try {
-            stockClient.confirm(items);
-            log.info("Estoque confirmado com sucesso para o pedido {}.", orderId);
+            stockEventPublisher.publishConfirm(orderId, items);
+            log.info("Evento de confirmação de estoque publicado para o pedido {}.", orderId);
         } catch (Exception ex) {
-            log.error("FALHA GRAVE: pagamento aprovado, mas não foi possível confirmar o estoque do pedido {}. " +
-                    "Requer reconciliação.", orderId, ex);
+            log.error("FALHA GRAVE: não foi possível publicar evento de confirmação de estoque " +
+                    "para o pedido {}. Requer reconciliação manual.", orderId, ex);
         }
     }
 }
