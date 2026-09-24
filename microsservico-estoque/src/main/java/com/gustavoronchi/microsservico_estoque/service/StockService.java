@@ -5,6 +5,8 @@ import com.gustavoronchi.microsservico_estoque.domain.repository.ProductReposito
 import com.gustavoronchi.microsservico_estoque.dto.ReservedItemDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemResponseDTO;
+import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
+import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -56,26 +58,59 @@ public class StockService {
     }
 
     @Transactional
-    public void release(List<StockItemRequestDTO> itens) {
-        for (StockItemRequestDTO item : itens) {
-            productRepository.findById(item.getProductId()).ifPresent(product -> {
-                int novaQuantidade = Math.max(0, product.getQuantityReserved() - item.getQuantity());
-                product.setQuantityReserved(novaQuantidade);
-                productRepository.save(product);
-            });
+    public void release(List<StockItemRequestDTO> items) {
+        for (StockItemRequestDTO item : items) {
+            Product product = productRepository.findById(item.getProductId())
+                    .orElseThrow(() -> new ProductNotFoundException("Produto com id: " + item.getProductId() + " não encontrado."));
+
+            if (product.getQuantityReserved() < item.getQuantity()) {
+                throw new StockInconsistencyException("Quantidade reservada insuficiente para liberar o produto "
+                                + product.getId()
+                                + ". Reservado: "
+                                + product.getQuantityReserved()
+                                + ", solicitado: "
+                                + item.getQuantity());
+            }
+            product.setQuantityReserved(
+                    product.getQuantityReserved() - item.getQuantity()
+            );
         }
     }
 
     @Transactional
-    public void confirm(List<StockItemRequestDTO> itens) {
-        for (StockItemRequestDTO item : itens) {
-            productRepository.findById(item.getProductId()).ifPresent(product -> {
-                int novoDisponivel = Math.max(0, product.getQuantityAvailable() - item.getQuantity());
-                int novaReservada = Math.max(0, product.getQuantityReserved() - item.getQuantity());
-                product.setQuantityAvailable(novoDisponivel);
-                product.setQuantityReserved(novaReservada);
-                productRepository.save(product);
-            });
+    public void confirm(List<StockItemRequestDTO> items) {
+        for (StockItemRequestDTO item : items) {
+            Product product = productRepository.findById(item.getProductId())
+                    .orElseThrow(() -> new ProductNotFoundException(
+                            "Produto com id: " + item.getProductId() + " não encontrado."));
+            if (product.getQuantityReserved() < item.getQuantity()) {
+                throw new StockInconsistencyException(
+                        "Quantidade reservada insuficiente para confirmar o produto "
+                                + product.getId()
+                                + ". Reservado: "
+                                + product.getQuantityReserved()
+                                + ", solicitado: "
+                                + item.getQuantity()
+                );
+            }
+
+            if (product.getQuantityAvailable() < item.getQuantity()) {
+                throw new StockInconsistencyException(
+                        "Quantidade disponível insuficiente para confirmar o produto "
+                                + product.getId()
+                                + ". Disponível: "
+                                + product.getQuantityAvailable()
+                                + ", solicitado: "
+                                + item.getQuantity());
+            }
+
+            product.setQuantityAvailable(
+                    product.getQuantityAvailable() - item.getQuantity()
+            );
+
+            product.setQuantityReserved(
+                    product.getQuantityReserved() - item.getQuantity()
+            );
         }
     }
 }
