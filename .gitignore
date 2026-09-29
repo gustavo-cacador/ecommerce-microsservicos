@@ -1,0 +1,6 @@
+.idea/
+data/
+**/target/
+**/*.mv.db
+**/*.trace.db
+.env
