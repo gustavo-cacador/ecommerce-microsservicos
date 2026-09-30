@@ -1,116 +1,196 @@
 package com.gustavoronchi.microsservico_estoque.service;
 
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
+import com.gustavoronchi.microsservico_estoque.domain.entities.StockReservation;
+import com.gustavoronchi.microsservico_estoque.domain.entities.StockReservationItem;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
+import com.gustavoronchi.microsservico_estoque.domain.repository.StockReservationRepository;
 import com.gustavoronchi.microsservico_estoque.dto.ReservedItemDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemResponseDTO;
+import com.gustavoronchi.microsservico_estoque.enums.ReservationStatus;
+import com.gustavoronchi.microsservico_estoque.exception.InvalidStockRequestException;
 import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
 import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyException;
-import org.springframework.dao.OptimisticLockingFailureException;
+import com.gustavoronchi.microsservico_estoque.exception.StockReservationNotFoundException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.UUID;
 
 @Service
 public class StockService {
 
     private final ProductRepository productRepository;
+    private final StockReservationRepository reservationRepository;
 
-    public StockService(ProductRepository productRepository) {
+    public StockService(ProductRepository productRepository, StockReservationRepository reservationRepository) {
         this.productRepository = productRepository;
+        this.reservationRepository = reservationRepository;
     }
 
     @Transactional
-    public StockItemResponseDTO reserve(List<StockItemRequestDTO> itens) {
+    public StockItemResponseDTO reserve(UUID orderId, List<StockItemRequestDTO> items) {
+        validateOrderId(orderId);
+        Map<UUID, Integer> quantities = consolidateItems(items);
+
+        StockReservation existing = reservationRepository.findByOrderId(orderId).orElse(null);
+        if (existing != null) {
+            return repeatedReservation(existing, quantities);
+        }
+
         List<Product> blockedProducts = new ArrayList<>();
-
-        for (StockItemRequestDTO item : itens) {
-            Product product = productRepository.findByIdForUpdate(item.getProductId()).orElse(null);
-
-            if (product == null || !product.getActive()) {
-                return new StockItemResponseDTO(false, "Produto não encontrado: " + item.getProductId());
+        for (UUID productId : quantities.keySet()) {
+            Product product = productRepository.findByIdForUpdate(productId).orElse(null);
+            if (product == null) {
+                return new StockItemResponseDTO(false, "Produto não encontrado: " + productId);
             }
-
-            int disponivel = product.getQuantityAvailable() - product.getQuantityReserved();
-            if (disponivel < item.getQuantity()) {
-                return new StockItemResponseDTO(false, "Estoque insuficiente para o produto " + product.getName());
-            }
-
             blockedProducts.add(product);
         }
 
-        List<ReservedItemDTO> reservedItems = new ArrayList<>();
-
-        for (int i = 0; i < itens.size(); i++) {
-            StockItemRequestDTO itemRequest = itens.get(i);
-            Product product = blockedProducts.get(i);
-
-            product.setQuantityReserved(product.getQuantityReserved() + itemRequest.getQuantity());
-            productRepository.save(product);
-
-            reservedItems.add(new ReservedItemDTO(product.getId(), product.getPrice()));
+        // Outra tentativa do mesmo pedido pode ter reservado enquanto aguardávamos os locks.
+        existing = reservationRepository.findByOrderId(orderId).orElse(null);
+        if (existing != null) {
+            return repeatedReservation(existing, quantities);
         }
 
-        return new StockItemResponseDTO(true, null, reservedItems);
-    }
-
-    @Transactional
-    public void release(List<StockItemRequestDTO> items) {
-        for (StockItemRequestDTO item : items) {
-            Product product = productRepository.findById(item.getProductId())
-                    .orElseThrow(() -> new ProductNotFoundException("Produto com id: " + item.getProductId() + " não encontrado."));
-
-            if (product.getQuantityReserved() < item.getQuantity()) {
-                throw new StockInconsistencyException("Quantidade reservada insuficiente para liberar o produto "
-                                + product.getId()
-                                + ". Reservado: "
-                                + product.getQuantityReserved()
-                                + ", solicitado: "
-                                + item.getQuantity());
+        for (Product product : blockedProducts) {
+            if (!Boolean.TRUE.equals(product.getActive())) {
+                return new StockItemResponseDTO(false, "Produto inativo: " + product.getId());
             }
-            product.setQuantityReserved(
-                    product.getQuantityReserved() - item.getQuantity()
-            );
+            int available = product.getQuantityAvailable() - product.getQuantityReserved();
+            if (available < quantities.get(product.getId())) {
+                return new StockItemResponseDTO(false, "Estoque insuficiente para o produto " + product.getName());
+            }
         }
+
+        StockReservation reservation = new StockReservation();
+        reservation.setOrderId(orderId);
+        reservation.setStatus(ReservationStatus.RESERVED);
+
+        for (Product product : blockedProducts) {
+            StockReservationItem item = new StockReservationItem();
+            item.setReservation(reservation);
+            item.setProductId(product.getId());
+            item.setQuantity(quantities.get(product.getId()));
+            item.setPrice(product.getPrice());
+            reservation.getItems().add(item);
+        }
+
+        try {
+            reservationRepository.saveAndFlush(reservation);
+        } catch (DataIntegrityViolationException ex) {
+            // Também protege tentativas simultâneas do mesmo pedido com produtos diferentes.
+            throw new StockInconsistencyException("Já existe uma reserva para o pedido " + orderId);
+        }
+
+        for (Product product : blockedProducts) {
+            product.setQuantityReserved(product.getQuantityReserved() + quantities.get(product.getId()));
+        }
+        return reservationResponse(reservation);
     }
 
     @Transactional
-    public void confirm(List<StockItemRequestDTO> items) {
-        for (StockItemRequestDTO item : items) {
-            Product product = productRepository.findById(item.getProductId())
+    public void release(UUID orderId) {
+        finishReservation(orderId, ReservationStatus.RELEASED);
+    }
+
+    @Transactional
+    public void confirm(UUID orderId) {
+        finishReservation(orderId, ReservationStatus.CONFIRMED);
+    }
+
+    private void finishReservation(UUID orderId, ReservationStatus targetStatus) {
+        validateOrderId(orderId);
+        StockReservation reservation = reservationRepository.findByOrderIdForUpdate(orderId)
+                .orElseThrow(() -> new StockReservationNotFoundException(orderId));
+
+        if (reservation.getStatus() == targetStatus) {
+            return;
+        }
+        if (reservation.getStatus() != ReservationStatus.RESERVED) {
+            throw new StockInconsistencyException("Reserva do pedido " + orderId
+                    + " já finalizada como " + reservation.getStatus());
+        }
+
+        List<StockReservationItem> items = reservation.getItems().stream()
+                .sorted(Comparator.comparing(StockReservationItem::getProductId))
+                .toList();
+
+        for (StockReservationItem item : items) {
+            Product product = productRepository.findByIdForUpdate(item.getProductId())
                     .orElseThrow(() -> new ProductNotFoundException(
                             "Produto com id: " + item.getProductId() + " não encontrado."));
+
             if (product.getQuantityReserved() < item.getQuantity()) {
                 throw new StockInconsistencyException(
-                        "Quantidade reservada insuficiente para confirmar o produto "
-                                + product.getId()
-                                + ". Reservado: "
-                                + product.getQuantityReserved()
-                                + ", solicitado: "
-                                + item.getQuantity()
-                );
+                        "Quantidade reservada insuficiente para o produto " + product.getId());
             }
 
-            if (product.getQuantityAvailable() < item.getQuantity()) {
-                throw new StockInconsistencyException(
-                        "Quantidade disponível insuficiente para confirmar o produto "
-                                + product.getId()
-                                + ". Disponível: "
-                                + product.getQuantityAvailable()
-                                + ", solicitado: "
-                                + item.getQuantity());
+            if (targetStatus == ReservationStatus.CONFIRMED) {
+                if (product.getQuantityAvailable() < item.getQuantity()) {
+                    throw new StockInconsistencyException(
+                            "Quantidade disponível insuficiente para o produto " + product.getId());
+                }
+                product.setQuantityAvailable(product.getQuantityAvailable() - item.getQuantity());
             }
 
-            product.setQuantityAvailable(
-                    product.getQuantityAvailable() - item.getQuantity()
-            );
+            product.setQuantityReserved(product.getQuantityReserved() - item.getQuantity());
+        }
+        reservation.setStatus(targetStatus);
+    }
 
-            product.setQuantityReserved(
-                    product.getQuantityReserved() - item.getQuantity()
-            );
+    private Map<UUID, Integer> consolidateItems(List<StockItemRequestDTO> items) {
+        if (items == null || items.isEmpty()) {
+            throw new InvalidStockRequestException("Informe ao menos um item para reservar.");
+        }
+
+        Map<UUID, Integer> quantities = new TreeMap<>();
+        for (StockItemRequestDTO item : items) {
+            if (item == null || item.getProductId() == null
+                    || item.getQuantity() == null || item.getQuantity() <= 0) {
+                throw new InvalidStockRequestException("Cada item deve ter produto e quantidade positiva.");
+            }
+            try {
+                quantities.merge(item.getProductId(), item.getQuantity(), Math::addExact);
+            } catch (ArithmeticException ex) {
+                throw new InvalidStockRequestException("Quantidade total excede o limite para o produto "
+                        + item.getProductId());
+            }
+        }
+        return quantities;
+    }
+
+    private StockItemResponseDTO repeatedReservation(StockReservation reservation, Map<UUID, Integer> quantities) {
+        Map<UUID, Integer> reservedQuantities = new TreeMap<>();
+        for (StockReservationItem item : reservation.getItems()) {
+            reservedQuantities.put(item.getProductId(), item.getQuantity());
+        }
+        if (!reservedQuantities.equals(quantities)) {
+            throw new StockInconsistencyException("Pedido já possui reserva com itens diferentes.");
+        }
+        if (reservation.getStatus() == ReservationStatus.RELEASED) {
+            throw new StockInconsistencyException("A reserva deste pedido já foi liberada.");
+        }
+        return reservationResponse(reservation);
+    }
+
+    private StockItemResponseDTO reservationResponse(StockReservation reservation) {
+        List<ReservedItemDTO> items = reservation.getItems().stream()
+                .map(item -> new ReservedItemDTO(item.getProductId(), item.getPrice()))
+                .toList();
+        return new StockItemResponseDTO(true, null, items);
+    }
+
+    private void validateOrderId(UUID orderId) {
+        if (orderId == null) {
+            throw new InvalidStockRequestException("Informe o pedido da reserva.");
         }
     }
 }

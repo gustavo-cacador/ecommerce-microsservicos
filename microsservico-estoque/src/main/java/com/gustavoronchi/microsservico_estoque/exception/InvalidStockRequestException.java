@@ -3,9 +3,9 @@ package com.gustavoronchi.microsservico_estoque.exception;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.ResponseStatus;
 
-@ResponseStatus(HttpStatus.CONFLICT)
-public class StockInconsistencyException extends RuntimeException {
-    public StockInconsistencyException(String message) {
+@ResponseStatus(HttpStatus.BAD_REQUEST)
+public class InvalidStockRequestException extends RuntimeException {
+    public InvalidStockRequestException(String message) {
         super(message);
     }
 }

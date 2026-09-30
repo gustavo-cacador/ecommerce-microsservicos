@@ -7,8 +7,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("stock")
@@ -21,19 +23,20 @@ public class StockResource {
     }
 
     @PostMapping("reserve")
-    public ResponseEntity<StockItemResponseDTO> reserve(@RequestBody List<StockItemRequestDTO> itens) {
-        return ResponseEntity.ok(stockService.reserve(itens));
+    public ResponseEntity<StockItemResponseDTO> reserve(@RequestParam UUID orderId,
+                                                      @RequestBody List<StockItemRequestDTO> items) {
+        return ResponseEntity.ok(stockService.reserve(orderId, items));
     }
 
     @PostMapping("release")
-    public ResponseEntity<Void> release(@RequestBody List<StockItemRequestDTO> itens) {
-        stockService.release(itens);
+    public ResponseEntity<Void> release(@RequestParam UUID orderId) {
+        stockService.release(orderId);
         return ResponseEntity.noContent().build();
     }
 
     @PostMapping("confirm")
-    public ResponseEntity<Void> confirm(@RequestBody List<StockItemRequestDTO> itens) {
-        stockService.confirm(itens);
+    public ResponseEntity<Void> confirm(@RequestParam UUID orderId) {
+        stockService.confirm(orderId);
         return ResponseEntity.noContent().build();
     }
 }

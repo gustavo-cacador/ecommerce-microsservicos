@@ -21,12 +21,12 @@ public class StockActionListener {
     @RabbitListener(queues = RabbitMQConfig.STOCK_CONFIRM_QUEUE)
     public void hearConfirmation(StockActionMessage message) {
         log.info("Confirmando estoque para o pedido {}", message.getOrderId());
-        stockService.confirm(message.getItems());
+        stockService.confirm(message.getOrderId());
     }
 
     @RabbitListener(queues = RabbitMQConfig.STOCK_RELEASE_QUEUE)
     public void hearRelease(StockActionMessage message) {
         log.info("Liberando estoque para o pedido {}", message.getOrderId());
-        stockService.release(message.getItems());
+        stockService.release(message.getOrderId());
     }
 }
