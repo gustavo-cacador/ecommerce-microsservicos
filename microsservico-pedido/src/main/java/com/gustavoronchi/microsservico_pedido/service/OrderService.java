@@ -32,14 +32,16 @@ public class OrderService {
     private final StockClient stockClient;
     private final PaymentClient paymentClient;
     private final StockEventPublisher stockEventPublisher;
+    private final OrderPaymentService orderPaymentService;
 
     private static final Logger log = LoggerFactory.getLogger(OrderService.class);
 
-    public OrderService(OrderRepository orderRepository, StockClient stockClient, PaymentClient paymentClient, StockEventPublisher stockEventPublisher) {
+    public OrderService(OrderRepository orderRepository, StockClient stockClient, PaymentClient paymentClient, StockEventPublisher stockEventPublisher, OrderPaymentService orderPaymentService) {
         this.orderRepository = orderRepository;
         this.stockClient = stockClient;
         this.paymentClient = paymentClient;
         this.stockEventPublisher = stockEventPublisher;
+        this.orderPaymentService = orderPaymentService;
     }
 
     @Transactional(readOnly = true)
@@ -67,21 +69,22 @@ public class OrderService {
 
     public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
 
+        Order order = new Order();
+
         List<StockItemRequestDTO> itemsToReserve = orderRequestDTO.getItems()
                 .stream()
                 .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
                 .toList();
 
         // reserva, se falhar aqui, nada foi comprometido ainda — não precisa compensar.
-        StockReserveResponseDTO stockResponse = reserveStock(itemsToReserve);
+        StockReserveResponseDTO stockResponse = reserveStock(order.getId(), itemsToReserve);
 
         //  monta e salva o pedido, se falhar, o estoque já foi reservado e precisa compensar.
-        Order order;
         try {
-            order = createOrderEntity(orderRequestDTO, stockResponse);
+            order = createOrderEntity(order, orderRequestDTO, stockResponse);
         } catch (Exception ex) {
             log.error("Erro ao montar/salvar pedido. Revertendo reserva de estoque...", ex);
-            releaseStock(itemsToReserve, null);
+            releaseStock(itemsToReserve, order.getId());
             throw new RuntimeException("Erro ao processar pedido. A reserva de estoque foi revertida.", ex);
         }
 
@@ -103,8 +106,10 @@ public class OrderService {
 
         // resultado do pagamento já é definitivo
         if ("APPROVED".equals(paymentResponse.getStatus())) {
-            order.setStatus(StatusOrder.PAID);
+            OrderResponseDTO response = orderPaymentService.approvePayment(order.getId());
+            // Publicação temporária após o commit; será substituída pelo relay da outbox.
             confirmStock(itemsToReserve, order.getId());
+            return response;
         } else {
             order.setStatus(StatusOrder.DECLINED_PAYMENT);
             releaseStock(itemsToReserve, order.getId());
@@ -116,9 +121,9 @@ public class OrderService {
         return new OrderResponseDTO(updatedOrder);
     }
 
-    private StockReserveResponseDTO reserveStock(List<StockItemRequestDTO> itemsToReserve) {
+    private StockReserveResponseDTO reserveStock(UUID orderId, List<StockItemRequestDTO> itemsToReserve) {
         try {
-            StockReserveResponseDTO response = stockClient.reserve(itemsToReserve);
+            StockReserveResponseDTO response = stockClient.reserve(orderId, itemsToReserve);
 
             if (!response.isSuccess()) {
                 throw new StockUnavailableException(response.getFailureReason());
@@ -131,13 +136,12 @@ public class OrderService {
         }
     }
 
-    private Order createOrderEntity(OrderRequestDTO orderRequestDTO, StockReserveResponseDTO stockResponse) {
+    private Order createOrderEntity(Order order, OrderRequestDTO orderRequestDTO, StockReserveResponseDTO stockResponse) {
         Map<UUID, BigDecimal> pricesByProduct = stockResponse
                 .getItems()
                 .stream()
                 .collect(Collectors.toMap(ReservedItemDTO::getProductId, ReservedItemDTO::getPrice));
 
-        Order order = new Order();
         order.setClientId(orderRequestDTO.getClientId());
         order.setStatus(StatusOrder.WAITING_PAYMENT);
         order.setCreatedAt(Instant.now());
