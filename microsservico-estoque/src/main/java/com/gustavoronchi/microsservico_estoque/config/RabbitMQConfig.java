@@ -14,6 +14,9 @@ public class RabbitMQConfig {
     public static final String STOCK_ORDER_CREATED_DLQ = "stock.order.created.dlq";
     public static final String STOCK_ORDER_CREATED_DLX = "stock.order.created.dlx";
 
+    public static final String STOCK_RESERVED_EXCHANGE = "stock.reserved";
+    public static final String STOCK_RESERVATION_FAILED_EXCHANGE = "stock.reservation.failed";
+
     public static final String STOCK_CONFIRM_EXCHANGE = "stock.confirm";
     public static final String STOCK_CONFIRM_QUEUE = "stock.confirm.queue";
     public static final String STOCK_CONFIRM_DLQ = "stock.confirm.dlq";

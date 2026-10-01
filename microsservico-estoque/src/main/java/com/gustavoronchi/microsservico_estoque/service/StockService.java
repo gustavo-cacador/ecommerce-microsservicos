@@ -1,9 +1,12 @@
 package com.gustavoronchi.microsservico_estoque.service;
 
+import com.gustavoronchi.microsservico_estoque.config.RabbitMQConfig;
+import com.gustavoronchi.microsservico_estoque.domain.entities.OutboxEvent;
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
 import com.gustavoronchi.microsservico_estoque.domain.entities.StockReservation;
 import com.gustavoronchi.microsservico_estoque.domain.entities.StockReservationItem;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
+import com.gustavoronchi.microsservico_estoque.domain.repository.OutboxEventRepository;
 import com.gustavoronchi.microsservico_estoque.domain.repository.StockReservationRepository;
 import com.gustavoronchi.microsservico_estoque.dto.ReservedItemDTO;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemRequestDTO;
@@ -13,10 +16,17 @@ import com.gustavoronchi.microsservico_estoque.exception.InvalidStockRequestExce
 import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
 import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyException;
 import com.gustavoronchi.microsservico_estoque.exception.StockReservationNotFoundException;
+import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedEvent;
+import com.gustavoronchi.microsservico_estoque.messaging.StockReservedEvent;
+import com.gustavoronchi.microsservico_estoque.messaging.StockReservationFailedEvent;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.json.JsonMapper;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -29,10 +39,59 @@ public class StockService {
 
     private final ProductRepository productRepository;
     private final StockReservationRepository reservationRepository;
+    private final OutboxEventRepository outboxRepository;
+    private final JsonMapper jsonMapper;
+    private final TransactionTemplate transactionTemplate;
 
-    public StockService(ProductRepository productRepository, StockReservationRepository reservationRepository) {
+    public StockService(ProductRepository productRepository, StockReservationRepository reservationRepository,
+                        OutboxEventRepository outboxRepository, JsonMapper jsonMapper, TransactionTemplate transactionTemplate) {
         this.productRepository = productRepository;
         this.reservationRepository = reservationRepository;
+        this.outboxRepository = outboxRepository;
+        this.jsonMapper = jsonMapper;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    public void reserveOrder(OrderCreatedEvent message) {
+        try {
+            transactionTemplate.executeWithoutResult(status -> createReservationResult(message));
+        } catch (DataIntegrityViolationException ex) {
+            // A transação concorrente pode ter concluído este mesmo evento. Consulte só após o rollback.
+            if (outboxRepository.findBySourceEventId(message.getEventId()).isEmpty()) {
+                throw ex;
+            }
+        }
+    }
+
+    private void createReservationResult(OrderCreatedEvent message) {
+        if (outboxRepository.findBySourceEventId(message.getEventId()).isPresent()) {
+            return;
+        }
+
+        OutboxEvent event = new OutboxEvent();
+        event.setSourceEventId(message.getEventId());
+        event.setOrderId(message.getOrderId());
+        event.setExchange(RabbitMQConfig.STOCK_RESERVED_EXCHANGE);
+        event.setRoutingKey("");
+        event.setOccurredAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        event.setPayload("");
+        // O sourceEventId único serializa reentregas, inclusive sem produto ou reserva para bloquear.
+        // Este registro só fica visível após o commit, já com o payload do resultado preenchido.
+        event = outboxRepository.saveAndFlush(event);
+
+        StockItemResponseDTO response = reserve(message.getOrderId(), message.getItems());
+        if (response.isSuccess()) {
+            StockReservation reservation = reservationRepository.findByOrderId(message.getOrderId()).orElseThrow();
+            StockReservedEvent result = new StockReservedEvent(event.getEventId(), message.getOrderId(),
+                    event.getOccurredAt(), reservation.getId(), message.getAmount(), message.getCurrency());
+            event.setPayload(jsonMapper.writeValueAsString(result));
+        } else {
+            event.setExchange(RabbitMQConfig.STOCK_RESERVATION_FAILED_EXCHANGE);
+            StockReservationFailedEvent result = new StockReservationFailedEvent(event.getEventId(), message.getOrderId(),
+                    event.getOccurredAt(), response.getFailureReason());
+            event.setPayload(jsonMapper.writeValueAsString(result));
+        }
+        outboxRepository.save(event);
     }
 
     @Transactional

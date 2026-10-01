@@ -1,12 +1,10 @@
 package com.gustavoronchi.microsservico_estoque.messaging;
 
 import com.gustavoronchi.microsservico_estoque.config.RabbitMQConfig;
-import com.gustavoronchi.microsservico_estoque.dto.StockItemResponseDTO;
 import com.gustavoronchi.microsservico_estoque.exception.InvalidStockRequestException;
 import com.gustavoronchi.microsservico_estoque.service.StockService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
@@ -29,12 +27,8 @@ public class OrderCreatedListener {
             throw new InvalidStockRequestException("Evento de criação de pedido inválido.");
         }
 
-        log.info("Reservando estoque: orderId={}, eventId={}", event.getOrderId(), event.getEventId());
-        StockItemResponseDTO response = stockService.reserve(event.getOrderId(), event.getItems());
-        if (!response.isSuccess()) {
-            // Preserva a mensagem para inspeção até conectar StockReservationFailedEvent.
-            throw new AmqpRejectAndDontRequeueException(response.getFailureReason());
-        }
-        log.info("Estoque reservado: orderId={}, eventId={}", event.getOrderId(), event.getEventId());
+        log.info("Processando reserva: orderId={}, eventId={}", event.getOrderId(), event.getEventId());
+        stockService.reserveOrder(event);
+        log.info("Resultado da reserva persistido: orderId={}, eventId={}", event.getOrderId(), event.getEventId());
     }
 }

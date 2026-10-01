@@ -1,6 +1,8 @@
 package com.gustavoronchi.microsservico_estoque.service;
 
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
+import com.gustavoronchi.microsservico_estoque.domain.entities.OutboxEvent;
+import com.gustavoronchi.microsservico_estoque.domain.repository.OutboxEventRepository;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
 import com.gustavoronchi.microsservico_estoque.domain.repository.StockReservationRepository;
 import com.gustavoronchi.microsservico_estoque.dto.StockItemRequestDTO;
@@ -12,16 +14,22 @@ import com.gustavoronchi.microsservico_estoque.messaging.StockActionListener;
 import com.gustavoronchi.microsservico_estoque.messaging.StockActionMessage;
 import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedEvent;
 import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedListener;
-import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import com.gustavoronchi.microsservico_estoque.messaging.StockReservedEvent;
+import com.gustavoronchi.microsservico_estoque.messaging.StockReservationFailedEvent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -36,9 +44,12 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
-@Import({StockService.class, StockActionListener.class, OrderCreatedListener.class})
+@Import({StockService.class, StockActionListener.class, OrderCreatedListener.class, StockServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class StockServiceTests {
 
@@ -52,12 +63,16 @@ class StockServiceTests {
     private StockActionListener listener;
     @Autowired
     private OrderCreatedListener orderCreatedListener;
+    @MockitoSpyBean
+    private OutboxEventRepository outbox;
+    @Autowired
+    private JsonMapper jsonMapper;
 
     @Test
     void duplicateOrderCreatedEventsReserveOnlyOnce() throws Exception {
         Product product = product(5);
         OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
-                List.of(item(product, 2)), new BigDecimal("20.00"), "BRL");
+                List.of(item(product, 2)), new BigDecimal("12.34"), "BRL");
 
         concurrently(() -> { orderCreatedListener.hearOrderCreated(event); return true; },
                 () -> { orderCreatedListener.hearOrderCreated(event); return true; });
@@ -65,21 +80,127 @@ class StockServiceTests {
         assertStock(product, 5, 2);
         assertThat(reservations.findByOrderId(event.getOrderId()).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.RESERVED);
+        OutboxEvent saved = outbox.findBySourceEventId(event.getEventId()).orElseThrow();
+        StockReservedEvent result = jsonMapper.readValue(saved.getPayload(), StockReservedEvent.class);
+        assertThat(saved.getExchange()).isEqualTo("stock.reserved");
+        assertThat(saved.getPublishedAt()).isNull();
+        assertThat(result.getEventId()).isEqualTo(saved.getEventId()).isNotEqualTo(event.getEventId());
+        assertThat(result.getOrderId()).isEqualTo(event.getOrderId());
+        assertThat(result.getOccurredAt()).isEqualTo(saved.getOccurredAt());
+        assertThat(result.getReservationId())
+                .isEqualTo(reservations.findByOrderId(event.getOrderId()).orElseThrow().getId());
+        assertThat(result.getAmount()).isEqualByComparingTo("12.34");
+        assertThat(result.getCurrency()).isEqualTo("BRL");
+
+        orderCreatedListener.hearOrderCreated(event);
+        assertThat(outbox.findBySourceEventId(event.getEventId()).orElseThrow().getEventId()).isEqualTo(saved.getEventId());
+        assertStock(product, 5, 2);
     }
 
     @Test
-    void unsuccessfulOrderCreatedReservationIsRejectedWithoutPartialStockChange() {
+    void unsuccessfulOrderCreatedReservationPersistsFailureWithoutPartialStockChange() {
         Product first = product(5);
         Product second = product(0);
         OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
                 List.of(item(first, 2), item(second, 1)), new BigDecimal("30.00"), "BRL");
 
-        assertThatThrownBy(() -> orderCreatedListener.hearOrderCreated(event))
-                .isInstanceOf(AmqpRejectAndDontRequeueException.class);
+        orderCreatedListener.hearOrderCreated(event);
 
         assertStock(first, 5, 0);
         assertStock(second, 0, 0);
         assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+        OutboxEvent saved = outbox.findBySourceEventId(event.getEventId()).orElseThrow();
+        StockReservationFailedEvent result = jsonMapper.readValue(saved.getPayload(), StockReservationFailedEvent.class);
+        assertThat(saved.getExchange()).isEqualTo("stock.reservation.failed");
+        assertThat(saved.getPublishedAt()).isNull();
+        assertThat(result.getEventId()).isEqualTo(saved.getEventId());
+        assertThat(result.getOrderId()).isEqualTo(event.getOrderId());
+        assertThat(result.getOccurredAt()).isEqualTo(saved.getOccurredAt());
+        assertThat(result.getFailureReason()).contains("Estoque insuficiente");
+    }
+
+    @Test
+    void outboxFailureRollsBackReservationAndAllowsRedelivery() {
+        Product product = product(5);
+        OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 2)), new BigDecimal("20.00"), "BRL");
+        doThrow(new DataIntegrityViolationException("Falha simulada na outbox"))
+                .when(outbox).save(any(OutboxEvent.class));
+
+        assertThatThrownBy(() -> orderCreatedListener.hearOrderCreated(event))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertStock(product, 5, 0);
+        assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+        assertThat(outbox.findBySourceEventId(event.getEventId())).isEmpty();
+
+        reset(outbox);
+        orderCreatedListener.hearOrderCreated(event);
+        assertStock(product, 5, 2);
+        assertThat(outbox.findBySourceEventId(event.getEventId())).isPresent();
+    }
+
+    @Test
+    void repeatedFailedEventKeepsOriginalResultAfterReplenishment() {
+        Product product = product(0);
+        OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 2)), new BigDecimal("20.00"), "BRL");
+        orderCreatedListener.hearOrderCreated(event);
+        UUID resultId = outbox.findBySourceEventId(event.getEventId()).orElseThrow().getEventId();
+        product.setQuantityAvailable(5);
+        products.saveAndFlush(product);
+
+        orderCreatedListener.hearOrderCreated(event);
+
+        assertStock(product, 5, 0);
+        assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+        OutboxEvent saved = outbox.findBySourceEventId(event.getEventId()).orElseThrow();
+        assertThat(saved.getEventId()).isEqualTo(resultId);
+        assertThat(saved.getExchange()).isEqualTo("stock.reservation.failed");
+    }
+
+    @Test
+    void concurrentMissingProductEventsPersistOnlyOneResult() throws Exception {
+        OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(new StockItemRequestDTO(UUID.randomUUID(), 1)), BigDecimal.TEN, "BRL");
+
+        concurrently(() -> { orderCreatedListener.hearOrderCreated(event); return true; },
+                () -> { orderCreatedListener.hearOrderCreated(event); return true; });
+
+        assertThat(outbox.findAll()).filteredOn(result -> result.getSourceEventId().equals(event.getEventId()))
+                .singleElement().satisfies(result -> assertThat(result.getExchange()).isEqualTo("stock.reservation.failed"));
+        assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+    }
+
+    @Test
+    void concurrentOrdersForLastUnitPersistSuccessAndFailure() throws Exception {
+        Product product = product(1);
+        OrderCreatedEvent first = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 1)), BigDecimal.TEN, "BRL");
+        OrderCreatedEvent second = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 1)), BigDecimal.TEN, "BRL");
+
+        concurrently(() -> { orderCreatedListener.hearOrderCreated(first); return true; },
+                () -> { orderCreatedListener.hearOrderCreated(second); return true; });
+
+        assertStock(product, 1, 1);
+        assertThat(List.of(outbox.findBySourceEventId(first.getEventId()).orElseThrow().getExchange(),
+                outbox.findBySourceEventId(second.getEventId()).orElseThrow().getExchange()))
+                .containsExactlyInAnyOrder("stock.reserved", "stock.reservation.failed");
+    }
+
+    @Test
+    void invalidQuantityDoesNotPersistResultEvent() {
+        Product product = product(5);
+        OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 0)), BigDecimal.TEN, "BRL");
+
+        assertThatThrownBy(() -> orderCreatedListener.hearOrderCreated(event))
+                .isInstanceOf(InvalidStockRequestException.class);
+
+        assertStock(product, 5, 0);
+        assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+        assertThat(outbox.findBySourceEventId(event.getEventId())).isEmpty();
     }
 
     @Test
@@ -265,6 +386,14 @@ class StockServiceTests {
                 .isInstanceOf(StockReservationNotFoundException.class);
         assertThatThrownBy(() -> service.confirm(UUID.randomUUID()))
                 .isInstanceOf(StockReservationNotFoundException.class);
+    }
+
+    @TestConfiguration
+    static class JsonConfig {
+        @Bean
+        JsonMapper jsonMapper() {
+            return JsonMapper.builder().build();
+        }
     }
 
     private Product product(int quantity) {
