@@ -5,8 +5,10 @@ import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 @Configuration
+@EnableScheduling
 public class RabbitMQConfig {
 
     public static final String ORDER_CREATED_EXCHANGE = "order.created";
@@ -15,7 +17,16 @@ public class RabbitMQConfig {
     public static final String STOCK_ORDER_CREATED_DLX = "stock.order.created.dlx";
 
     public static final String STOCK_RESERVED_EXCHANGE = "stock.reserved";
+    public static final String ORDER_STOCK_RESERVED_QUEUE = "order.stock.reserved.queue";
+    public static final String ORDER_STOCK_RESERVED_DLQ = "order.stock.reserved.dlq";
+    public static final String ORDER_STOCK_RESERVED_DLX = "order.stock.reserved.dlx";
+    public static final String PAYMENT_STOCK_RESERVED_QUEUE = "payment.stock.reserved.queue";
+    public static final String PAYMENT_STOCK_RESERVED_DLQ = "payment.stock.reserved.dlq";
+    public static final String PAYMENT_STOCK_RESERVED_DLX = "payment.stock.reserved.dlx";
     public static final String STOCK_RESERVATION_FAILED_EXCHANGE = "stock.reservation.failed";
+    public static final String ORDER_STOCK_RESERVATION_FAILED_QUEUE = "order.stock.reservation.failed.queue";
+    public static final String ORDER_STOCK_RESERVATION_FAILED_DLQ = "order.stock.reservation.failed.dlq";
+    public static final String ORDER_STOCK_RESERVATION_FAILED_DLX = "order.stock.reservation.failed.dlx";
 
     public static final String STOCK_CONFIRM_EXCHANGE = "stock.confirm";
     public static final String STOCK_CONFIRM_QUEUE = "stock.confirm.queue";
@@ -57,6 +68,97 @@ public class RabbitMQConfig {
     @Bean
     public Binding bindStockOrderCreatedDlq() {
         return BindingBuilder.bind(stockOrderCreatedDlq()).to(stockOrderCreatedDlx());
+    }
+
+    @Bean
+    public FanoutExchange stockReservedExchange() {
+        return new FanoutExchange(STOCK_RESERVED_EXCHANGE);
+    }
+
+    @Bean
+    public FanoutExchange stockReservationFailedExchange() {
+        return new FanoutExchange(STOCK_RESERVATION_FAILED_EXCHANGE);
+    }
+
+    @Bean
+    public Queue orderStockReservedQueue() {
+        return QueueBuilder.durable(ORDER_STOCK_RESERVED_QUEUE)
+                .withArgument("x-dead-letter-exchange", ORDER_STOCK_RESERVED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange orderStockReservedDlx() {
+        return new FanoutExchange(ORDER_STOCK_RESERVED_DLX);
+    }
+
+    @Bean
+    public Queue orderStockReservedDlq() {
+        return QueueBuilder.durable(ORDER_STOCK_RESERVED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindOrderStockReservedQueue() {
+        return BindingBuilder.bind(orderStockReservedQueue()).to(stockReservedExchange());
+    }
+
+    @Bean
+    public Binding bindOrderStockReservedDlq() {
+        return BindingBuilder.bind(orderStockReservedDlq()).to(orderStockReservedDlx());
+    }
+
+    @Bean
+    public Queue paymentStockReservedQueue() {
+        return QueueBuilder.durable(PAYMENT_STOCK_RESERVED_QUEUE)
+                .withArgument("x-dead-letter-exchange", PAYMENT_STOCK_RESERVED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange paymentStockReservedDlx() {
+        return new FanoutExchange(PAYMENT_STOCK_RESERVED_DLX);
+    }
+
+    @Bean
+    public Queue paymentStockReservedDlq() {
+        return QueueBuilder.durable(PAYMENT_STOCK_RESERVED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindPaymentStockReservedQueue() {
+        return BindingBuilder.bind(paymentStockReservedQueue()).to(stockReservedExchange());
+    }
+
+    @Bean
+    public Binding bindPaymentStockReservedDlq() {
+        return BindingBuilder.bind(paymentStockReservedDlq()).to(paymentStockReservedDlx());
+    }
+
+    @Bean
+    public Queue orderStockReservationFailedQueue() {
+        return QueueBuilder.durable(ORDER_STOCK_RESERVATION_FAILED_QUEUE)
+                .withArgument("x-dead-letter-exchange", ORDER_STOCK_RESERVATION_FAILED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange orderStockReservationFailedDlx() {
+        return new FanoutExchange(ORDER_STOCK_RESERVATION_FAILED_DLX);
+    }
+
+    @Bean
+    public Queue orderStockReservationFailedDlq() {
+        return QueueBuilder.durable(ORDER_STOCK_RESERVATION_FAILED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindOrderStockReservationFailedQueue() {
+        return BindingBuilder.bind(orderStockReservationFailedQueue()).to(stockReservationFailedExchange());
+    }
+
+    @Bean
+    public Binding bindOrderStockReservationFailedDlq() {
+        return BindingBuilder.bind(orderStockReservationFailedDlq()).to(orderStockReservationFailedDlx());
     }
 
     @Bean
