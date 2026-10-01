@@ -1,11 +1,13 @@
 package com.gustavoronchi.microsservico_estoque.service;
 
 import com.gustavoronchi.microsservico_estoque.exception.DatabaseException;
+import com.gustavoronchi.microsservico_estoque.exception.InvalidProductRequestException;
 import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
 import com.gustavoronchi.microsservico_estoque.dto.ProductRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductResponseDTO;
+import com.gustavoronchi.microsservico_estoque.dto.ProductPriceDTO;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -14,7 +16,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class ProductService {
@@ -41,6 +47,25 @@ public class ProductService {
         return productRepository
                 .search(categoryId, pageable)
                 .map(ProductResponseDTO::new);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ProductPriceDTO> findPrices(List<UUID> productIds) {
+        if (productIds == null || productIds.isEmpty() || productIds.stream().anyMatch(Objects::isNull)) {
+            throw new InvalidProductRequestException("Informe ao menos um produto e não envie IDs nulos.");
+        }
+
+        List<UUID> uniqueIds = productIds.stream().distinct().toList();
+        Map<UUID, Product> products = productRepository.findAllById(uniqueIds).stream()
+                .collect(Collectors.toMap(Product::getId, product -> product));
+
+        return uniqueIds.stream().map(id -> {
+            Product product = products.get(id);
+            if (product == null || !Boolean.TRUE.equals(product.getActive())) {
+                throw new ProductNotFoundException("Produto com id: " + id + " não encontrado.");
+            }
+            return new ProductPriceDTO(product.getId(), product.getPrice());
+        }).toList();
     }
 
     @Transactional

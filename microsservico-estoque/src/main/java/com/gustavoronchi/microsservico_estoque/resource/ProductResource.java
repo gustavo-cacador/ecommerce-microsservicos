@@ -2,6 +2,7 @@ package com.gustavoronchi.microsservico_estoque.resource;
 
 import com.gustavoronchi.microsservico_estoque.dto.ProductRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductResponseDTO;
+import com.gustavoronchi.microsservico_estoque.dto.ProductPriceDTO;
 import com.gustavoronchi.microsservico_estoque.service.ProductService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.net.URI;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -46,6 +48,11 @@ public class ProductResource {
                 .toUri();
 
         return ResponseEntity.created(uri).body(response);
+    }
+
+    @PostMapping("prices")
+    public ResponseEntity<List<ProductPriceDTO>> findPrices(@RequestBody List<UUID> productIds) {
+        return ResponseEntity.ok(productService.findPrices(productIds));
     }
 
     @PutMapping("{id}")
