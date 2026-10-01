@@ -1,8 +1,8 @@
 package com.gustavoronchi.microsservico_pedido.client;
 
 import com.gustavoronchi.microsservico_pedido.dto.ProductResponseDTO;
-import com.gustavoronchi.microsservico_pedido.dto.StockItemRequestDTO;
-import com.gustavoronchi.microsservico_pedido.dto.StockReserveResponseDTO;
+import com.gustavoronchi.microsservico_pedido.dto.ProductPriceDTO;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
@@ -19,12 +19,12 @@ public class StockClient {
         this.restClient = RestClient.builder().baseUrl(baseUrl).build();
     }
 
-    public StockReserveResponseDTO reserve(UUID orderId, List<StockItemRequestDTO> itens) {
+    public List<ProductPriceDTO> findPrices(List<UUID> productIds) {
         return restClient.post()
-                .uri("/stock/reserve?orderId={orderId}", orderId)
-                .body(itens)
+                .uri("/products/prices")
+                .body(productIds)
                 .retrieve()
-                .body(StockReserveResponseDTO.class);
+                .body(new ParameterizedTypeReference<List<ProductPriceDTO>>() {});
     }
 
     // implementar depois para detalhar produto no frontend chamando pedido-service

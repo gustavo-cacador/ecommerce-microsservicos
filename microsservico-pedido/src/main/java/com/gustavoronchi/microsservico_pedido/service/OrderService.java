@@ -1,25 +1,30 @@
 package com.gustavoronchi.microsservico_pedido.service;
 
-import com.gustavoronchi.microsservico_pedido.client.*;
+import com.gustavoronchi.microsservico_pedido.client.StockClient;
+import com.gustavoronchi.microsservico_pedido.config.RabbitMQConfig;
 import com.gustavoronchi.microsservico_pedido.domain.entities.Order;
 import com.gustavoronchi.microsservico_pedido.domain.entities.OrderItem;
+import com.gustavoronchi.microsservico_pedido.domain.entities.OutboxEvent;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OrderRepository;
+import com.gustavoronchi.microsservico_pedido.domain.repository.OutboxEventRepository;
 import com.gustavoronchi.microsservico_pedido.dto.*;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
+import com.gustavoronchi.microsservico_pedido.exception.InvalidOrderRequestException;
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
-import com.gustavoronchi.microsservico_pedido.exception.PaymentUnavailableException;
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
-import com.gustavoronchi.microsservico_pedido.messaging.StockEventPublisher;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -30,18 +35,16 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final StockClient stockClient;
-    private final PaymentClient paymentClient;
-    private final StockEventPublisher stockEventPublisher;
-    private final OrderPaymentService orderPaymentService;
+    private final OutboxEventRepository outboxRepository;
+    private final JsonMapper jsonMapper;
+    private final TransactionTemplate transactionTemplate;
 
-    private static final Logger log = LoggerFactory.getLogger(OrderService.class);
-
-    public OrderService(OrderRepository orderRepository, StockClient stockClient, PaymentClient paymentClient, StockEventPublisher stockEventPublisher, OrderPaymentService orderPaymentService) {
+    public OrderService(OrderRepository orderRepository, StockClient stockClient, OutboxEventRepository outboxRepository, JsonMapper jsonMapper, TransactionTemplate transactionTemplate) {
         this.orderRepository = orderRepository;
         this.stockClient = stockClient;
-        this.paymentClient = paymentClient;
-        this.stockEventPublisher = stockEventPublisher;
-        this.orderPaymentService = orderPaymentService;
+        this.outboxRepository = outboxRepository;
+        this.jsonMapper = jsonMapper;
+        this.transactionTemplate = transactionTemplate;
     }
 
     @Transactional(readOnly = true)
@@ -67,118 +70,68 @@ public class OrderService {
         return new OrderResponseDTO(updated);
     }
 
-    public OrderResponseDTO createOrder(OrderRequestDTO orderRequestDTO) {
+    public OrderResponseDTO createOrder(OrderRequestDTO request) {
+        if (request == null || request.getClientId() == null || request.getItems() == null || request.getItems().isEmpty()
+                || request.getItems().stream().anyMatch(item -> item == null || item.getProductId() == null
+                        || item.getQuantity() == null || item.getQuantity() <= 0)) {
+            throw new InvalidOrderRequestException("Informe cliente e itens com produto e quantidade positiva.");
+        }
 
+        List<ProductPriceDTO> prices;
+        try {
+            prices = stockClient.findPrices(request.getItems().stream()
+                    .map(OrderItemRequestDTO::getProductId).distinct().toList());
+        } catch (HttpClientErrorException.NotFound ex) {
+            throw new InvalidOrderRequestException("Pedido contém produto inexistente ou inativo.");
+        } catch (RestClientException ex) {
+            throw new StockUnavailableException("Não foi possível consultar os preços: " + ex.getMessage());
+        }
+        if (prices == null) {
+            throw new StockUnavailableException("Catálogo retornou uma resposta vazia.");
+        }
+        return transactionTemplate.execute(status -> create(request, prices));
+    }
+
+    private OrderResponseDTO create(OrderRequestDTO request, List<ProductPriceDTO> prices) {
+        Map<UUID, BigDecimal> pricesByProduct = prices.stream()
+                .collect(Collectors.toMap(ProductPriceDTO::getProductId, ProductPriceDTO::getPrice));
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
         Order order = new Order();
+        order.setClientId(request.getClientId());
+        order.setStatus(StatusOrder.CREATED);
+        order.setCreatedAt(now);
+        order.setUpdatedAt(now);
 
-        List<StockItemRequestDTO> itemsToReserve = orderRequestDTO.getItems()
-                .stream()
-                .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
-                .toList();
-
-        // reserva, se falhar aqui, nada foi comprometido ainda — não precisa compensar.
-        StockReserveResponseDTO stockResponse = reserveStock(order.getId(), itemsToReserve);
-
-        //  monta e salva o pedido, se falhar, o estoque já foi reservado e precisa compensar.
-        try {
-            order = createOrderEntity(order, orderRequestDTO, stockResponse);
-        } catch (Exception ex) {
-            log.error("Erro ao montar/salvar pedido. Revertendo reserva de estoque...", ex);
-            releaseStock(itemsToReserve, order.getId());
-            throw new RuntimeException("Erro ao processar pedido. A reserva de estoque foi revertida.", ex);
-        }
-
-        // processa o pagamento.
-        PaymentResponseDTO paymentResponse;
-        try {
-            paymentResponse = paymentClient.process(new PaymentRequestDTO(order.getId(), order.getTotalValue()));
-        } catch (RestClientException ex) {
-            log.error("Erro ao contatar serviço de pagamento para o pedido {}", order.getId(), ex);
-
-            releaseStock(itemsToReserve, order.getId());
-
-            order.setStatus(StatusOrder.DECLINED_PAYMENT);
-            order.setUpdatedAt(Instant.now());
-            orderRepository.save(order);
-
-            throw new PaymentUnavailableException("Não foi possível contatar o serviço de pagamento: " + ex.getMessage());
-        }
-
-        // resultado do pagamento já é definitivo
-        if ("APPROVED".equals(paymentResponse.getStatus())) {
-            return orderPaymentService.approvePayment(order.getId());
-        } else {
-            order.setStatus(StatusOrder.DECLINED_PAYMENT);
-            releaseStock(itemsToReserve, order.getId());
-        }
-
-        order.setUpdatedAt(Instant.now());
-        Order updatedOrder = orderRepository.save(order);
-
-        return new OrderResponseDTO(updatedOrder);
-    }
-
-    private StockReserveResponseDTO reserveStock(UUID orderId, List<StockItemRequestDTO> itemsToReserve) {
-        try {
-            StockReserveResponseDTO response = stockClient.reserve(orderId, itemsToReserve);
-
-            if (!response.isSuccess()) {
-                throw new StockUnavailableException(response.getFailureReason());
-            }
-
-            return response;
-
-        } catch (RestClientException ex) {
-            throw new StockUnavailableException("Não foi possível contatar o serviço de estoque: " + ex.getMessage());
-        }
-    }
-
-    private Order createOrderEntity(Order order, OrderRequestDTO orderRequestDTO, StockReserveResponseDTO stockResponse) {
-        Map<UUID, BigDecimal> pricesByProduct = stockResponse
-                .getItems()
-                .stream()
-                .collect(Collectors.toMap(ReservedItemDTO::getProductId, ReservedItemDTO::getPrice));
-
-        order.setClientId(orderRequestDTO.getClientId());
-        order.setStatus(StatusOrder.WAITING_PAYMENT);
-        order.setCreatedAt(Instant.now());
-        order.setUpdatedAt(Instant.now());
-
-        for (OrderItemRequestDTO itemRequestDTO : orderRequestDTO.getItems()) {
-            BigDecimal price = pricesByProduct.get(itemRequestDTO.getProductId());
-
+        for (OrderItemRequestDTO requested : request.getItems()) {
+            BigDecimal price = pricesByProduct.get(requested.getProductId());
             if (price == null) {
-                throw new IllegalStateException(
-                        "Estoque não retornou preço para o produto " + itemRequestDTO.getProductId() +
-                                " — resposta de reserva inconsistente."
-                );
+                throw new IllegalStateException("Catálogo não retornou preço para o produto " + requested.getProductId());
             }
-
-            OrderItem orderItem = new OrderItem();
-            orderItem.setOrder(order);
-            orderItem.setProductId(itemRequestDTO.getProductId());
-            orderItem.setQuantity(itemRequestDTO.getQuantity());
-            orderItem.setPrice(price);
-            order.getItems().add(orderItem);
+            OrderItem item = new OrderItem();
+            item.setOrder(order);
+            item.setProductId(requested.getProductId());
+            item.setQuantity(requested.getQuantity());
+            item.setPrice(price);
+            order.getItems().add(item);
         }
-
-        BigDecimal total = order.getItems()
-                .stream()
+        order.setTotalValue(order.getItems().stream()
                 .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        order.setTotalValue(total);
+                .reduce(BigDecimal.ZERO, BigDecimal::add));
+        Order saved = orderRepository.save(order);
 
-        return orderRepository.save(order);
+        OutboxEvent event = new OutboxEvent();
+        event.setOrderId(saved.getId());
+        event.setExchange(RabbitMQConfig.ORDER_CREATED_EXCHANGE);
+        event.setRoutingKey("");
+        event.setOccurredAt(now);
+        OrderCreatedEvent message = new OrderCreatedEvent(event.getEventId(), saved.getId(), now,
+                saved.getItems().stream()
+                        .map(item -> new StockItemRequestDTO(item.getProductId(), item.getQuantity()))
+                        .toList(),
+                saved.getTotalValue(), "BRL");
+        event.setPayload(jsonMapper.writeValueAsString(message));
+        outboxRepository.save(event);
+
+        return new OrderResponseDTO(saved);
     }
-
-    private void releaseStock(List<StockItemRequestDTO> items, UUID orderId) {
-        try {
-            stockEventPublisher.publishRelease(orderId, items);
-            log.info("Evento de liberação de estoque publicado para o pedido {}.", orderId);
-        } catch (Exception ex) {
-            log.error("FALHA GRAVE: não foi possível publicar evento de liberação de estoque " + " para o pedido {}. Requer reconciliação manual.",
-                    orderId, ex);
-        }
-    }
-
 }
