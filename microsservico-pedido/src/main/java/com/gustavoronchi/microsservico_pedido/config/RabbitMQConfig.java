@@ -11,8 +11,14 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class RabbitMQConfig {
 
+    public static final String ORDER_CREATED_EXCHANGE = "order.created";
     public static final String STOCK_CONFIRM_EXCHANGE = "stock.confirm";
     public static final String STOCK_RELEASE_EXCHANGE = "stock.release";
+
+    @Bean
+    public FanoutExchange orderCreatedExchange() {
+        return new FanoutExchange(ORDER_CREATED_EXCHANGE);
+    }
 
     @Bean
     public FanoutExchange stockConfirmExchange() {

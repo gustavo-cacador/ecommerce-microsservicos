@@ -9,6 +9,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class RabbitMQConfig {
 
+    public static final String ORDER_CREATED_EXCHANGE = "order.created";
+    public static final String STOCK_ORDER_CREATED_QUEUE = "stock.order.created.queue";
+    public static final String STOCK_ORDER_CREATED_DLQ = "stock.order.created.dlq";
+    public static final String STOCK_ORDER_CREATED_DLX = "stock.order.created.dlx";
+
     public static final String STOCK_CONFIRM_EXCHANGE = "stock.confirm";
     public static final String STOCK_CONFIRM_QUEUE = "stock.confirm.queue";
     public static final String STOCK_CONFIRM_DLQ = "stock.confirm.dlq";
@@ -18,6 +23,38 @@ public class RabbitMQConfig {
     public static final String STOCK_RELEASE_QUEUE = "stock.release.queue";
     public static final String STOCK_RELEASE_DLQ = "stock.release.dlq";
     public static final String STOCK_RELEASE_DLX = "stock.release.dlx";
+
+    @Bean
+    public FanoutExchange orderCreatedExchange() {
+        return new FanoutExchange(ORDER_CREATED_EXCHANGE);
+    }
+
+    @Bean
+    public Queue stockOrderCreatedQueue() {
+        return QueueBuilder.durable(STOCK_ORDER_CREATED_QUEUE)
+                .withArgument("x-dead-letter-exchange", STOCK_ORDER_CREATED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange stockOrderCreatedDlx() {
+        return new FanoutExchange(STOCK_ORDER_CREATED_DLX);
+    }
+
+    @Bean
+    public Queue stockOrderCreatedDlq() {
+        return QueueBuilder.durable(STOCK_ORDER_CREATED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindStockOrderCreatedQueue() {
+        return BindingBuilder.bind(stockOrderCreatedQueue()).to(orderCreatedExchange());
+    }
+
+    @Bean
+    public Binding bindStockOrderCreatedDlq() {
+        return BindingBuilder.bind(stockOrderCreatedDlq()).to(stockOrderCreatedDlx());
+    }
 
     @Bean
     public FanoutExchange stockConfirmExchange() {
