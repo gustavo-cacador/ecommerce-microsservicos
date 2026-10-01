@@ -13,11 +13,15 @@ spring:
     hibernate:
       ddl-auto: update
     show-sql: true
-  RabbitMQ:
+  rabbitmq:
     host: localhost
     port: 5672
     username: guest
     password: guest
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
     listener:
       simple:
         default-requeue-rejected: false

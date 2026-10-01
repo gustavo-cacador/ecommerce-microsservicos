@@ -79,20 +79,13 @@ class OrderPaymentServiceTests {
     }
 
     @Test
-    void commitsPaidOrderAndConfirmationBeforePublishingOutsideTransaction() {
-        doAnswer(invocation -> {
-            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-            UUID orderId = invocation.getArgument(0);
-            assertThat(orders.findById(orderId).orElseThrow().getStatus()).isEqualTo(StatusOrder.PAID);
-            assertConfirmation(orderId);
-            return null;
-        }).when(publisher).publishConfirm(any(), any());
-
+    void commitsPaidOrderAndConfirmationWithoutPublishingDirectly() {
         OrderResponseDTO response = service.createOrder(request());
 
         assertThat(response.getStatus()).isEqualTo(StatusOrder.PAID);
-        verify(publisher).publishConfirm(any(), any());
-        verify(publisher, never()).publishRelease(any(), any());
+        assertThat(orders.findById(response.getOrderId()).orElseThrow().getStatus()).isEqualTo(StatusOrder.PAID);
+        assertConfirmation(response.getOrderId());
+        verifyNoInteractions(publisher);
     }
 
     @Test
@@ -106,16 +99,6 @@ class OrderPaymentServiceTests {
                 .extracting(Order::getStatus).isEqualTo(StatusOrder.WAITING_PAYMENT);
         assertThat(events.findAll()).isEmpty();
         verifyNoInteractions(publisher);
-    }
-
-    @Test
-    void publicationFailureLeavesPaidOrderAndPendingEvent() {
-        doThrow(new IllegalStateException("RabbitMQ indisponível")).when(publisher).publishConfirm(any(), any());
-
-        OrderResponseDTO response = service.createOrder(request());
-
-        assertThat(orders.findById(response.getOrderId()).orElseThrow().getStatus()).isEqualTo(StatusOrder.PAID);
-        assertConfirmation(response.getOrderId());
     }
 
     @Test

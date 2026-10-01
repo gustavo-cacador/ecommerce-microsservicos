@@ -106,10 +106,7 @@ public class OrderService {
 
         // resultado do pagamento já é definitivo
         if ("APPROVED".equals(paymentResponse.getStatus())) {
-            OrderResponseDTO response = orderPaymentService.approvePayment(order.getId());
-            // Publicação temporária após o commit; será substituída pelo relay da outbox.
-            confirmStock(itemsToReserve, order.getId());
-            return response;
+            return orderPaymentService.approvePayment(order.getId());
         } else {
             order.setStatus(StatusOrder.DECLINED_PAYMENT);
             releaseStock(itemsToReserve, order.getId());
@@ -184,13 +181,4 @@ public class OrderService {
         }
     }
 
-    private void confirmStock(List<StockItemRequestDTO> items, UUID orderId) {
-        try {
-            stockEventPublisher.publishConfirm(orderId, items);
-            log.info("Evento de confirmação de estoque publicado para o pedido {}.", orderId);
-        } catch (Exception ex) {
-            log.error("FALHA GRAVE: não foi possível publicar evento de confirmação de estoque " +
-                    "para o pedido {}. Requer reconciliação manual.", orderId, ex);
-        }
-    }
 }

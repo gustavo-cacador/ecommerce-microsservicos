@@ -17,10 +17,6 @@ public class StockEventPublisher {
         this.rabbitTemplate = rabbitTemplate;
     }
 
-    public void publishConfirm(UUID orderId, List<StockItemRequestDTO> items) {
-        rabbitTemplate.convertAndSend(RabbitMQConfig.STOCK_CONFIRM_EXCHANGE, "", new StockActionMessage(orderId, items));
-    }
-
     public void publishRelease(UUID orderId, List<StockItemRequestDTO> items) {
         rabbitTemplate.convertAndSend(RabbitMQConfig.STOCK_RELEASE_EXCHANGE, "", new StockActionMessage(orderId, items));
     }
