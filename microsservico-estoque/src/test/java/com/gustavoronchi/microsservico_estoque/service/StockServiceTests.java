@@ -10,6 +10,9 @@ import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyExcep
 import com.gustavoronchi.microsservico_estoque.exception.StockReservationNotFoundException;
 import com.gustavoronchi.microsservico_estoque.messaging.StockActionListener;
 import com.gustavoronchi.microsservico_estoque.messaging.StockActionMessage;
+import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedEvent;
+import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedListener;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
@@ -21,6 +24,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -34,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
-@Import({StockService.class, StockActionListener.class})
+@Import({StockService.class, StockActionListener.class, OrderCreatedListener.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class StockServiceTests {
 
@@ -46,6 +50,50 @@ class StockServiceTests {
     private StockReservationRepository reservations;
     @Autowired
     private StockActionListener listener;
+    @Autowired
+    private OrderCreatedListener orderCreatedListener;
+
+    @Test
+    void duplicateOrderCreatedEventsReserveOnlyOnce() throws Exception {
+        Product product = product(5);
+        OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 2)), new BigDecimal("20.00"), "BRL");
+
+        concurrently(() -> { orderCreatedListener.hearOrderCreated(event); return true; },
+                () -> { orderCreatedListener.hearOrderCreated(event); return true; });
+
+        assertStock(product, 5, 2);
+        assertThat(reservations.findByOrderId(event.getOrderId()).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RESERVED);
+    }
+
+    @Test
+    void unsuccessfulOrderCreatedReservationIsRejectedWithoutPartialStockChange() {
+        Product first = product(5);
+        Product second = product(0);
+        OrderCreatedEvent event = new OrderCreatedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
+                List.of(item(first, 2), item(second, 1)), new BigDecimal("30.00"), "BRL");
+
+        assertThatThrownBy(() -> orderCreatedListener.hearOrderCreated(event))
+                .isInstanceOf(AmqpRejectAndDontRequeueException.class);
+
+        assertStock(first, 5, 0);
+        assertStock(second, 0, 0);
+        assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+    }
+
+    @Test
+    void malformedOrderCreatedEventDoesNotReserveStock() {
+        Product product = product(5);
+        OrderCreatedEvent event = new OrderCreatedEvent(null, UUID.randomUUID(), Instant.now(),
+                List.of(item(product, 2)), new BigDecimal("20.00"), "BRL");
+
+        assertThatThrownBy(() -> orderCreatedListener.hearOrderCreated(event))
+                .isInstanceOf(InvalidStockRequestException.class);
+
+        assertStock(product, 5, 0);
+        assertThat(reservations.findByOrderId(event.getOrderId())).isEmpty();
+    }
 
     @Test
     void repeatedProductsCannotExceedAvailableStock() {
