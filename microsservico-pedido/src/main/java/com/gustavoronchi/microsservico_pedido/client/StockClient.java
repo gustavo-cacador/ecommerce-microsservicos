@@ -19,9 +19,9 @@ public class StockClient {
         this.restClient = RestClient.builder().baseUrl(baseUrl).build();
     }
 
-    public StockReserveResponseDTO reserve(List<StockItemRequestDTO> itens) {
+    public StockReserveResponseDTO reserve(UUID orderId, List<StockItemRequestDTO> itens) {
         return restClient.post()
-                .uri("/stock/reserve")
+                .uri("/stock/reserve?orderId={orderId}", orderId)
                 .body(itens)
                 .retrieve()
                 .body(StockReserveResponseDTO.class);
