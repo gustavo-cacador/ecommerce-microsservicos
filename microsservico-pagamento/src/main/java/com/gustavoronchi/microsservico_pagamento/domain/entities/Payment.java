@@ -16,8 +16,13 @@ public class Payment {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @Column(nullable = false)
+    @Column(nullable = false, unique = true)
     private UUID orderId;
+
+    private UUID reservationId;
+
+    @Column(nullable = false)
+    private String currency = "BRL";
 
     @Column(nullable = false)
     private BigDecimal amount;
@@ -54,6 +59,22 @@ public class Payment {
 
     public void setOrderId(UUID orderId) {
         this.orderId = orderId;
+    }
+
+    public UUID getReservationId() {
+        return reservationId;
+    }
+
+    public void setReservationId(UUID reservationId) {
+        this.reservationId = reservationId;
+    }
+
+    public String getCurrency() {
+        return currency;
+    }
+
+    public void setCurrency(String currency) {
+        this.currency = currency;
     }
 
     public BigDecimal getAmount() {
