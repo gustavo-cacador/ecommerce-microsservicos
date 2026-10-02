@@ -1,6 +1,7 @@
 package com.gustavoronchi.microsservico_pagamento.service;
 
 import com.gustavoronchi.microsservico_pagamento.domain.entities.Payment;
+import com.gustavoronchi.microsservico_pagamento.domain.repositories.OutboxEventRepository;
 import com.gustavoronchi.microsservico_pagamento.domain.repositories.PaymentRepository;
 import com.gustavoronchi.microsservico_pagamento.enums.PaymentStatus;
 import com.gustavoronchi.microsservico_pagamento.exception.InvalidPaymentRequestException;
@@ -8,6 +9,7 @@ import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGateway;
 import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGatewayUnavailableException;
 import com.gustavoronchi.microsservico_pagamento.messaging.PaymentListener;
 import com.gustavoronchi.microsservico_pagamento.messaging.StockReservedEvent;
+import com.gustavoronchi.microsservico_pagamento.messaging.PaymentApprovedEvent;
 import com.gustavoronchi.microsservico_pagamento.resource.PaymentResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,6 +17,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.MediaType;
@@ -24,6 +28,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -41,7 +46,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DataJpaTest(showSql = false)
-@Import({PaymentService.class, PaymentListener.class})
+@Import({PaymentService.class, PaymentListener.class, PaymentServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class PaymentServiceTests {
 
@@ -53,10 +58,15 @@ class PaymentServiceTests {
     private PaymentRepository payments;
     @MockitoBean
     private PaymentGateway gateway;
+    @MockitoSpyBean
+    private OutboxEventRepository events;
+    @Autowired
+    private JsonMapper jsonMapper;
     private StockReservedEvent event;
 
     @BeforeEach
     void setUp() {
+        events.deleteAll();
         payments.deleteAll();
         event = new StockReservedEvent(UUID.randomUUID(), UUID.randomUUID(), Instant.now(),
                 UUID.randomUUID(), new BigDecimal("499.80"), "BRL");
@@ -70,6 +80,7 @@ class PaymentServiceTests {
     void approvesAndSkipsDuplicateAfterCompletion() {
         listener.hearStockReserved(event);
         Payment first = onlyPayment();
+        UUID approvalEventId = events.findAll().getFirst().getEventId();
         listener.hearStockReserved(event);
         Payment repeated = onlyPayment();
 
@@ -78,6 +89,19 @@ class PaymentServiceTests {
         assertThat(repeated.getCreatedAt()).isEqualTo(first.getCreatedAt());
         assertThat(repeated.getReservationId()).isEqualTo(event.getReservationId());
         assertThat(repeated.getCurrency()).isEqualTo("BRL");
+        assertThat(events.findAll()).hasSize(1);
+        var outbox = events.findAll().getFirst();
+        assertThat(outbox.getEventId()).isEqualTo(approvalEventId);
+        assertThat(outbox.getPublishedAt()).isNull();
+        assertThat(outbox.getExchange()).isEqualTo("payment.approved");
+        PaymentApprovedEvent approval = jsonMapper.readValue(outbox.getPayload(), PaymentApprovedEvent.class);
+        assertThat(approval.getEventId()).isEqualTo(outbox.getEventId());
+        assertThat(approval.getOrderId()).isEqualTo(first.getOrderId());
+        assertThat(approval.getPaymentId()).isEqualTo(first.getId());
+        assertThat(approval.getReservationId()).isEqualTo(first.getReservationId());
+        assertThat(approval.getOccurredAt()).isEqualTo(outbox.getOccurredAt());
+        assertThat(approval.getAmount()).isEqualByComparingTo(first.getAmount());
+        assertThat(approval.getCurrency()).isEqualTo("BRL");
         verify(gateway, times(1)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
@@ -87,6 +111,7 @@ class PaymentServiceTests {
         listener.hearStockReserved(event);
         listener.hearStockReserved(event);
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.REFUSED);
+        assertThat(events.count()).isZero();
         verify(gateway, times(1)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
@@ -97,6 +122,7 @@ class PaymentServiceTests {
                 .isInstanceOf(PaymentGatewayUnavailableException.class);
         Payment pending = onlyPayment();
         assertThat(pending.getStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(events.count()).isZero();
 
         doAnswer(invocation -> {
             assertPendingOutsideTransaction();
@@ -104,6 +130,7 @@ class PaymentServiceTests {
         }).when(gateway).process(any(), any(), any());
         listener.hearStockReserved(event);
         assertThat(onlyPayment().getId()).isEqualTo(pending.getId());
+        assertThat(events.count()).isEqualTo(1);
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.APPROVED);
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
@@ -124,6 +151,7 @@ class PaymentServiceTests {
             second.get(15, TimeUnit.SECONDS);
         }
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.APPROVED);
+        assertThat(events.count()).isEqualTo(1);
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
@@ -138,10 +166,28 @@ class PaymentServiceTests {
         assertThatThrownBy(() -> listener.hearStockReserved(event))
                 .isInstanceOf(DataAccessResourceFailureException.class);
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(events.count()).isZero();
         reset(payments);
         doReturn(PaymentStatus.APPROVED).when(gateway).process(any(), any(), any());
         listener.hearStockReserved(event);
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.APPROVED);
+        verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
+    }
+
+    @Test
+    void outboxFailureRollsBackApprovalAndRetryCreatesOneEvent() {
+        doThrow(new DataAccessResourceFailureException("Falha na outbox")).when(events).save(any());
+
+        assertThatThrownBy(() -> listener.hearStockReserved(event))
+                .isInstanceOf(DataAccessResourceFailureException.class);
+        assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(events.count()).isZero();
+
+        reset(events);
+        listener.hearStockReserved(event);
+        listener.hearStockReserved(event);
+        assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.APPROVED);
+        assertThat(events.count()).isEqualTo(1);
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
@@ -174,6 +220,7 @@ class PaymentServiceTests {
         }
         assertThatThrownBy(() -> listener.hearStockReserved(event)).isInstanceOf(InvalidPaymentRequestException.class);
         assertThat(payments.count()).isZero();
+        assertThat(events.count()).isZero();
         verifyNoInteractions(gateway);
     }
 
@@ -182,6 +229,7 @@ class PaymentServiceTests {
         doReturn(PaymentStatus.PENDING).when(gateway).process(any(), any(), any());
         assertThatThrownBy(() -> listener.hearStockReserved(event)).isInstanceOf(IllegalStateException.class);
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(events.count()).isZero();
     }
 
     @Test
@@ -193,16 +241,26 @@ class PaymentServiceTests {
         mvc.perform(post("/payments").contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isOk()).andExpect(jsonPath("status").value("APPROVED"));
         assertThat(payments.count()).isEqualTo(1);
+        assertThat(events.count()).isZero();
         verify(gateway, times(1)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
     private void assertPendingOutsideTransaction() {
         assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(events.count()).isZero();
     }
 
     private Payment onlyPayment() {
         assertThat(payments.count()).isEqualTo(1);
         return payments.findAll().getFirst();
+    }
+
+    @TestConfiguration
+    static class JsonConfig {
+        @Bean
+        JsonMapper jsonMapper() {
+            return JsonMapper.builder().build();
+        }
     }
 }

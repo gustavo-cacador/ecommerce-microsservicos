@@ -1,6 +1,9 @@
 package com.gustavoronchi.microsservico_pagamento.service;
 
 import com.gustavoronchi.microsservico_pagamento.domain.entities.Payment;
+import com.gustavoronchi.microsservico_pagamento.config.RabbitMQConfig;
+import com.gustavoronchi.microsservico_pagamento.domain.entities.OutboxEvent;
+import com.gustavoronchi.microsservico_pagamento.domain.repositories.OutboxEventRepository;
 import com.gustavoronchi.microsservico_pagamento.domain.repositories.PaymentRepository;
 import com.gustavoronchi.microsservico_pagamento.dto.PaymentRequestDTO;
 import com.gustavoronchi.microsservico_pagamento.dto.PaymentResponseDTO;
@@ -8,9 +11,11 @@ import com.gustavoronchi.microsservico_pagamento.enums.PaymentStatus;
 import com.gustavoronchi.microsservico_pagamento.exception.InvalidPaymentRequestException;
 import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGateway;
 import com.gustavoronchi.microsservico_pagamento.messaging.StockReservedEvent;
+import com.gustavoronchi.microsservico_pagamento.messaging.PaymentApprovedEvent;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -24,12 +29,17 @@ public class PaymentService {
     private final PaymentRepository paymentRepository;
     private final PaymentGateway paymentGateway;
     private final TransactionTemplate transactionTemplate;
+    private final OutboxEventRepository outboxRepository;
+    private final JsonMapper jsonMapper;
 
     public PaymentService(PaymentRepository paymentRepository, PaymentGateway paymentGateway,
-                          TransactionTemplate transactionTemplate) {
+                          TransactionTemplate transactionTemplate, OutboxEventRepository outboxRepository,
+                          JsonMapper jsonMapper) {
         this.paymentRepository = paymentRepository;
         this.paymentGateway = paymentGateway;
         this.transactionTemplate = transactionTemplate;
+        this.outboxRepository = outboxRepository;
+        this.jsonMapper = jsonMapper;
     }
 
     public PaymentResponseDTO process(PaymentRequestDTO dto) {
@@ -60,9 +70,24 @@ public class PaymentService {
             Payment current = paymentRepository.findByOrderIdForUpdate(orderId).orElseThrow();
             if (current.getStatus() == PaymentStatus.PENDING) {
                 current.setStatus(result);
+                if (result == PaymentStatus.APPROVED && current.getReservationId() != null) {
+                    saveApprovalEvent(current);
+                }
             }
             return new PaymentResponseDTO(current);
         });
+    }
+
+    private void saveApprovalEvent(Payment payment) {
+        OutboxEvent outbox = new OutboxEvent();
+        outbox.setOrderId(payment.getOrderId());
+        outbox.setExchange(RabbitMQConfig.PAYMENT_APPROVED_EXCHANGE);
+        outbox.setRoutingKey("");
+        outbox.setOccurredAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        PaymentApprovedEvent event = new PaymentApprovedEvent(outbox.getEventId(), payment.getOrderId(),
+                outbox.getOccurredAt(), payment.getId(), payment.getReservationId(), payment.getAmount(), payment.getCurrency());
+        outbox.setPayload(jsonMapper.writeValueAsString(event));
+        outboxRepository.save(outbox);
     }
 
     private Payment preparePayment(UUID orderId, UUID reservationId, BigDecimal amount, String currency) {
