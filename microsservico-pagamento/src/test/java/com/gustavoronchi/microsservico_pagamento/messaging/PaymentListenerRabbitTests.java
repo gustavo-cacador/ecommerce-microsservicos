@@ -2,6 +2,7 @@ package com.gustavoronchi.microsservico_pagamento.messaging;
 
 import com.gustavoronchi.microsservico_pagamento.config.RabbitMQConfig;
 import com.gustavoronchi.microsservico_pagamento.domain.repositories.PaymentRepository;
+import com.gustavoronchi.microsservico_pagamento.domain.repositories.OutboxEventRepository;
 import com.gustavoronchi.microsservico_pagamento.enums.PaymentStatus;
 import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGateway;
 import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGatewayUnavailableException;
@@ -17,6 +18,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
+import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -35,6 +37,10 @@ class PaymentListenerRabbitTests {
     private RabbitTemplate rabbit;
     @Autowired
     private PaymentRepository payments;
+    @Autowired
+    private OutboxEventRepository events;
+    @Autowired
+    private JsonMapper jsonMapper;
     @MockitoBean
     private PaymentGateway gateway;
 
@@ -50,6 +56,7 @@ class PaymentListenerRabbitTests {
         await(() -> deadLetters() == 1);
         assertThat(payments.findAll()).hasSize(1);
         assertThat(payments.findAll().getFirst().getStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(events.count()).isZero();
         UUID paymentId = payments.findAll().getFirst().getId();
 
         doReturn(PaymentStatus.APPROVED).when(gateway).process(any(), any(), any());
@@ -65,6 +72,36 @@ class PaymentListenerRabbitTests {
         await(() -> deadLetters() == 2);
         assertThat(payments.findAll().getFirst().getStatus()).isEqualTo(PaymentStatus.APPROVED);
         verify(gateway, times(2)).process(orderId, payments.findAll().getFirst().getAmount(), "BRL");
+
+        await(() -> events.count() == 1 && events.findAll().getFirst().getPublishedAt() != null);
+        Message orderCopy = rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_APPROVED_QUEUE, 5000);
+        Message stockCopy = rabbit.receive(RabbitMQConfig.STOCK_PAYMENT_APPROVED_QUEUE, 5000);
+        assertThat(orderCopy).isNotNull();
+        assertThat(stockCopy).isNotNull();
+        assertThat(stockCopy.getBody()).isEqualTo(orderCopy.getBody());
+        var outbox = events.findAll().getFirst();
+        assertThat(new String(orderCopy.getBody(), StandardCharsets.UTF_8)).isEqualTo(outbox.getPayload());
+        assertThat(orderCopy.getMessageProperties().getMessageId()).isEqualTo(outbox.getEventId().toString());
+        PaymentApprovedEvent approval = jsonMapper.readValue(orderCopy.getBody(), PaymentApprovedEvent.class);
+        assertThat(approval.getOrderId()).isEqualTo(orderId);
+        assertThat(approval.getPaymentId()).isEqualTo(paymentId);
+        assertThat(approval.getReservationId()).isEqualTo(payments.findAll().getFirst().getReservationId());
+
+        rabbit.send(RabbitMQConfig.PAYMENT_APPROVED_EXCHANGE, "", orderCopy);
+        rejectApproval(RabbitMQConfig.ORDER_PAYMENT_APPROVED_QUEUE);
+        rejectApproval(RabbitMQConfig.STOCK_PAYMENT_APPROVED_QUEUE);
+        assertThat(rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_APPROVED_DLQ, 5000)).isNotNull();
+        assertThat(rabbit.receive(RabbitMQConfig.STOCK_PAYMENT_APPROVED_DLQ, 5000)).isNotNull();
+    }
+
+    private void rejectApproval(String queue) throws InterruptedException {
+        await(() -> Boolean.TRUE.equals(rabbit.execute(channel -> channel.messageCount(queue) > 0)));
+        rabbit.execute(channel -> {
+            var message = channel.basicGet(queue, false);
+            assertThat(message).isNotNull();
+            channel.basicReject(message.getEnvelope().getDeliveryTag(), false);
+            return null;
+        });
     }
 
     private void publish(String payload) {
