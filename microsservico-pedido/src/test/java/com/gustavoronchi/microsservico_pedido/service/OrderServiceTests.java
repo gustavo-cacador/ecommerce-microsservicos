@@ -8,12 +8,18 @@ import com.gustavoronchi.microsservico_pedido.dto.OrderItemRequestDTO;
 import com.gustavoronchi.microsservico_pedido.dto.OrderRequestDTO;
 import com.gustavoronchi.microsservico_pedido.dto.ProductPriceDTO;
 import com.gustavoronchi.microsservico_pedido.dto.StockItemRequestDTO;
+import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
+import com.gustavoronchi.microsservico_pedido.exception.InvalidOrderRequestException;
+import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
+import com.gustavoronchi.microsservico_pedido.messaging.StockReservedEvent;
+import com.gustavoronchi.microsservico_pedido.messaging.StockReservedListener;
 import com.gustavoronchi.microsservico_pedido.resource.OrderResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -36,8 +42,13 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -51,7 +62,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
-@Import({OrderService.class, OrderServiceTests.JsonConfig.class})
+@Import({OrderService.class, OrderPaymentService.class, StockReservedListener.class, OrderServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class OrderServiceTests {
 
@@ -65,6 +76,10 @@ class OrderServiceTests {
     private OutboxEventRepository events;
     @MockitoBean
     private StockClient stockClient;
+    @Autowired
+    private StockReservedListener stockReservedListener;
+    @Autowired
+    private OrderPaymentService orderPaymentService;
 
     private MockMvc mvc;
     private final UUID firstProductId = UUID.randomUUID();
@@ -179,6 +194,124 @@ class OrderServiceTests {
 
         assertThat(orders.findAll()).isEmpty();
         assertThat(events.findAll()).isEmpty();
+    }
+
+    @Test
+    void concurrentReservedEventsMoveCreatedOrderToWaitingOnlyOnce() throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        StockReservedEvent event = reservedEvent(orderId);
+
+        concurrently(() -> { stockReservedListener.hearStockReserved(event); return true; },
+                () -> { stockReservedListener.hearStockReserved(event); return true; });
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.WAITING_PAYMENT);
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+        stockReservedListener.hearStockReserved(event);
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = StatusOrder.class, names = "CREATED", mode = EnumSource.Mode.EXCLUDE)
+    void lateReservedEventDoesNotChangeExistingStatus(StatusOrder status) {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        var order = orders.findById(orderId).orElseThrow();
+        order.setStatus(status);
+        orders.saveAndFlush(order);
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+
+        stockReservedListener.hearStockReserved(reservedEvent(orderId));
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(status);
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+    }
+
+    @Test
+    void concurrentApprovalAndReservedEventKeepPaidStatus() throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        StockReservedEvent event = reservedEvent(orderId);
+        stockReservedListener.hearStockReserved(event);
+
+        concurrently(() -> orderPaymentService.approvePayment(orderId),
+                () -> { stockReservedListener.hearStockReserved(event); return true; });
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.PAID);
+    }
+
+    @Test
+    void mismatchedReservationAmountDoesNotChangeOrderStatus() {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        StockReservedEvent event = reservedEvent(orderId);
+        event.setAmount(new BigDecimal("99.00"));
+
+        assertThatThrownBy(() -> stockReservedListener.hearStockReserved(event))
+                .isInstanceOf(InvalidOrderRequestException.class);
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    @Test
+    void unknownOrderIsRejectedInsteadOfBeingCreatedByReservationEvent() {
+        UUID orderId = UUID.randomUUID();
+
+        assertThatThrownBy(() -> stockReservedListener.hearStockReserved(reservedEvent(orderId)))
+                .isInstanceOf(OrderNotFoundException.class);
+
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"event", "eventId", "orderId", "occurredAt", "reservationId", "amount", "negativeAmount", "currency", "foreignCurrency"})
+    void malformedReservedEventDoesNotChangeOrderStatus(String invalidField) {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        StockReservedEvent event = reservedEvent(orderId);
+        switch (invalidField) {
+            case "event" -> event = null;
+            case "eventId" -> event.setEventId(null);
+            case "orderId" -> event.setOrderId(null);
+            case "occurredAt" -> event.setOccurredAt(null);
+            case "reservationId" -> event.setReservationId(null);
+            case "amount" -> event.setAmount(null);
+            case "negativeAmount" -> event.setAmount(new BigDecimal("-1.00"));
+            case "currency" -> event.setCurrency(null);
+            case "foreignCurrency" -> event.setCurrency("USD");
+            default -> throw new IllegalArgumentException(invalidField);
+        }
+        StockReservedEvent invalidEvent = event;
+
+        assertThatThrownBy(() -> stockReservedListener.hearStockReserved(invalidEvent))
+                .isInstanceOf(InvalidOrderRequestException.class);
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    private StockReservedEvent reservedEvent(UUID orderId) {
+        return new StockReservedEvent(UUID.randomUUID(), orderId, Instant.now(), UUID.randomUUID(),
+                new BigDecimal("10.0"), "BRL");
+    }
+
+    private <T> List<T> concurrently(Callable<T> first, Callable<T> second) throws Exception {
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            CountDownLatch ready = new CountDownLatch(2);
+            CountDownLatch start = new CountDownLatch(1);
+            var tasks = List.of(first, second).stream().map(task -> executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Timeout aguardando início concorrente");
+                }
+                return task.call();
+            })).toList();
+            try {
+                assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+                start.countDown();
+                return List.of(tasks.get(0).get(10, TimeUnit.SECONDS), tasks.get(1).get(10, TimeUnit.SECONDS));
+            } finally {
+                executor.shutdownNow();
+            }
+        }
     }
 
     private OrderRequestDTO request(Integer quantity) {

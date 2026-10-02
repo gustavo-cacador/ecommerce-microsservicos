@@ -70,6 +70,19 @@ public class OrderService {
         return new OrderResponseDTO(updated);
     }
 
+    @Transactional
+    public void waitForPayment(UUID orderId, BigDecimal amount) {
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + orderId + " não encontrado."));
+        if (amount == null || order.getTotalValue().compareTo(amount) != 0) {
+            throw new InvalidOrderRequestException("Valor da reserva diferente do total do pedido: " + orderId);
+        }
+        if (order.getStatus() == StatusOrder.CREATED) {
+            order.setStatus(StatusOrder.WAITING_PAYMENT);
+            order.setUpdatedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        }
+    }
+
     public OrderResponseDTO createOrder(OrderRequestDTO request) {
         if (request == null || request.getClientId() == null || request.getItems() == null || request.getItems().isEmpty()
                 || request.getItems().stream().anyMatch(item -> item == null || item.getProductId() == null
