@@ -20,6 +20,10 @@ public class RabbitMQConfig {
     public static final String ORDER_STOCK_RESERVED_QUEUE = "order.stock.reserved.queue";
     public static final String ORDER_STOCK_RESERVED_DLQ = "order.stock.reserved.dlq";
     public static final String ORDER_STOCK_RESERVED_DLX = "order.stock.reserved.dlx";
+    public static final String PAYMENT_APPROVED_EXCHANGE = "payment.approved";
+    public static final String ORDER_PAYMENT_APPROVED_QUEUE = "order.payment.approved.queue";
+    public static final String ORDER_PAYMENT_APPROVED_DLQ = "order.payment.approved.dlq";
+    public static final String ORDER_PAYMENT_APPROVED_DLX = "order.payment.approved.dlx";
     public static final String STOCK_CONFIRM_EXCHANGE = "stock.confirm";
     public static final String STOCK_RELEASE_EXCHANGE = "stock.release";
 
@@ -58,6 +62,38 @@ public class RabbitMQConfig {
     @Bean
     public Binding bindOrderStockReservedDlq() {
         return BindingBuilder.bind(orderStockReservedDlq()).to(orderStockReservedDlx());
+    }
+
+    @Bean
+    public FanoutExchange paymentApprovedExchange() {
+        return new FanoutExchange(PAYMENT_APPROVED_EXCHANGE);
+    }
+
+    @Bean
+    public Queue orderPaymentApprovedQueue() {
+        return QueueBuilder.durable(ORDER_PAYMENT_APPROVED_QUEUE)
+                .withArgument("x-dead-letter-exchange", ORDER_PAYMENT_APPROVED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange orderPaymentApprovedDlx() {
+        return new FanoutExchange(ORDER_PAYMENT_APPROVED_DLX);
+    }
+
+    @Bean
+    public Queue orderPaymentApprovedDlq() {
+        return QueueBuilder.durable(ORDER_PAYMENT_APPROVED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindOrderPaymentApprovedQueue() {
+        return BindingBuilder.bind(orderPaymentApprovedQueue()).to(paymentApprovedExchange());
+    }
+
+    @Bean
+    public Binding bindOrderPaymentApprovedDlq() {
+        return BindingBuilder.bind(orderPaymentApprovedDlq()).to(orderPaymentApprovedDlx());
     }
 
     @Bean
