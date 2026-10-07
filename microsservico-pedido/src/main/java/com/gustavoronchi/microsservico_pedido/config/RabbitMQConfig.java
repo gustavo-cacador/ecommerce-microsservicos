@@ -24,7 +24,6 @@ public class RabbitMQConfig {
     public static final String ORDER_PAYMENT_APPROVED_QUEUE = "order.payment.approved.queue";
     public static final String ORDER_PAYMENT_APPROVED_DLQ = "order.payment.approved.dlq";
     public static final String ORDER_PAYMENT_APPROVED_DLX = "order.payment.approved.dlx";
-    public static final String STOCK_CONFIRM_EXCHANGE = "stock.confirm";
     public static final String STOCK_RELEASE_EXCHANGE = "stock.release";
 
     @Bean
@@ -94,11 +93,6 @@ public class RabbitMQConfig {
     @Bean
     public Binding bindOrderPaymentApprovedDlq() {
         return BindingBuilder.bind(orderPaymentApprovedDlq()).to(orderPaymentApprovedDlx());
-    }
-
-    @Bean
-    public FanoutExchange stockConfirmExchange() {
-        return new FanoutExchange(STOCK_CONFIRM_EXCHANGE);
     }
 
     @Bean

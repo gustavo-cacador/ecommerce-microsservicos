@@ -80,7 +80,7 @@ class OutboxRelayTests {
         doAnswer(invocation -> {
             CorrelationData correlation = invocation.getArgument(3);
             if (returned) {
-                correlation.setReturned(new ReturnedMessage(invocation.getArgument(2), 312, "NO_ROUTE", "stock.confirm", ""));
+                correlation.setReturned(new ReturnedMessage(invocation.getArgument(2), 312, "NO_ROUTE", "order.created", ""));
             }
             correlation.getFuture().complete(new CorrelationData.Confirm(returned, returned ? null : "NACK"));
             return null;
@@ -193,7 +193,7 @@ class OutboxRelayTests {
         OutboxEvent event = new OutboxEvent();
         event.setOrderId(UUID.randomUUID());
         event.setOccurredAt(Instant.now());
-        event.setExchange("stock.confirm");
+        event.setExchange("order.created");
         event.setRoutingKey("");
         event.setPayload("{\"eventId\":\"" + event.getEventId() + "\",\"orderId\":\"" + event.getOrderId() + "\"}");
         return events.saveAndFlush(event);

@@ -64,7 +64,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
-@Import({OrderService.class, OrderPaymentService.class, StockReservedListener.class,
+@Import({OrderService.class, StockReservedListener.class,
         PaymentApprovedListener.class, OrderServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class OrderServiceTests {
@@ -81,8 +81,6 @@ class OrderServiceTests {
     private StockClient stockClient;
     @Autowired
     private StockReservedListener stockReservedListener;
-    @Autowired
-    private OrderPaymentService orderPaymentService;
     @Autowired
     private PaymentApprovedListener paymentApprovedListener;
 
@@ -237,10 +235,12 @@ class OrderServiceTests {
         StockReservedEvent event = reservedEvent(orderId);
         stockReservedListener.hearStockReserved(event);
 
-        concurrently(() -> orderPaymentService.approvePayment(orderId),
+        concurrently(() -> { paymentApprovedListener.hearPaymentApproved(approvedEvent(orderId)); return true; },
                 () -> { stockReservedListener.hearStockReserved(event); return true; });
 
         assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.PAID);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(result -> assertThat(result.getExchange()).isEqualTo("order.created"));
     }
 
     @Test

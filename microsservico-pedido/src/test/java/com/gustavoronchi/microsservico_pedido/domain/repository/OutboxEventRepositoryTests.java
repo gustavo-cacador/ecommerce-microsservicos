@@ -79,7 +79,7 @@ class OutboxEventRepositoryTests {
     private Order order() {
         Order order = new Order();
         order.setClientId(java.util.UUID.randomUUID());
-        order.setStatus(StatusOrder.PAID);
+        order.setStatus(StatusOrder.CREATED);
         order.setTotalValue(new BigDecimal("10.00"));
         order.setCreatedAt(Instant.now());
         order.setUpdatedAt(Instant.now());
@@ -89,7 +89,7 @@ class OutboxEventRepositoryTests {
     private OutboxEvent event(Order order) {
         OutboxEvent event = new OutboxEvent();
         event.setOrderId(order.getId());
-        event.setExchange("stock.confirm");
+        event.setExchange("order.created");
         event.setRoutingKey("");
         event.setPayload("{\"orderId\":\"" + order.getId() + "\"}");
         event.setOccurredAt(Instant.now());
