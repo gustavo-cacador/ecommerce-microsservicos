@@ -96,6 +96,16 @@ public class OrderService {
         }
     }
 
+    @Transactional
+    public void cancelForStockFailure(UUID orderId) {
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + orderId + " não encontrado."));
+        if (order.getStatus() == StatusOrder.CREATED) {
+            order.setStatus(StatusOrder.CANCELED);
+            order.setUpdatedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        }
+    }
+
     public OrderResponseDTO createOrder(OrderRequestDTO request) {
         if (request == null || request.getClientId() == null || request.getItems() == null || request.getItems().isEmpty()
                 || request.getItems().stream().anyMatch(item -> item == null || item.getProductId() == null

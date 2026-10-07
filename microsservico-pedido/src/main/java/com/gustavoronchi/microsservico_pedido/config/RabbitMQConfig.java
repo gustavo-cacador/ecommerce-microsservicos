@@ -20,6 +20,10 @@ public class RabbitMQConfig {
     public static final String ORDER_STOCK_RESERVED_QUEUE = "order.stock.reserved.queue";
     public static final String ORDER_STOCK_RESERVED_DLQ = "order.stock.reserved.dlq";
     public static final String ORDER_STOCK_RESERVED_DLX = "order.stock.reserved.dlx";
+    public static final String STOCK_RESERVATION_FAILED_EXCHANGE = "stock.reservation.failed";
+    public static final String ORDER_STOCK_RESERVATION_FAILED_QUEUE = "order.stock.reservation.failed.queue";
+    public static final String ORDER_STOCK_RESERVATION_FAILED_DLQ = "order.stock.reservation.failed.dlq";
+    public static final String ORDER_STOCK_RESERVATION_FAILED_DLX = "order.stock.reservation.failed.dlx";
     public static final String PAYMENT_APPROVED_EXCHANGE = "payment.approved";
     public static final String ORDER_PAYMENT_APPROVED_QUEUE = "order.payment.approved.queue";
     public static final String ORDER_PAYMENT_APPROVED_DLQ = "order.payment.approved.dlq";
@@ -34,6 +38,38 @@ public class RabbitMQConfig {
     @Bean
     public FanoutExchange stockReservedExchange() {
         return new FanoutExchange(STOCK_RESERVED_EXCHANGE);
+    }
+
+    @Bean
+    public FanoutExchange stockReservationFailedExchange() {
+        return new FanoutExchange(STOCK_RESERVATION_FAILED_EXCHANGE);
+    }
+
+    @Bean
+    public Queue orderStockReservationFailedQueue() {
+        return QueueBuilder.durable(ORDER_STOCK_RESERVATION_FAILED_QUEUE)
+                .withArgument("x-dead-letter-exchange", ORDER_STOCK_RESERVATION_FAILED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange orderStockReservationFailedDlx() {
+        return new FanoutExchange(ORDER_STOCK_RESERVATION_FAILED_DLX);
+    }
+
+    @Bean
+    public Queue orderStockReservationFailedDlq() {
+        return QueueBuilder.durable(ORDER_STOCK_RESERVATION_FAILED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindOrderStockReservationFailedQueue() {
+        return BindingBuilder.bind(orderStockReservationFailedQueue()).to(stockReservationFailedExchange());
+    }
+
+    @Bean
+    public Binding bindOrderStockReservationFailedDlq() {
+        return BindingBuilder.bind(orderStockReservationFailedDlq()).to(orderStockReservationFailedDlx());
     }
 
     @Bean

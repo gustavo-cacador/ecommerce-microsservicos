@@ -16,6 +16,8 @@ import com.gustavoronchi.microsservico_pedido.messaging.PaymentApprovedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.PaymentApprovedListener;
 import com.gustavoronchi.microsservico_pedido.messaging.StockReservedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.StockReservedListener;
+import com.gustavoronchi.microsservico_pedido.messaging.StockReservationFailedEvent;
+import com.gustavoronchi.microsservico_pedido.messaging.StockReservationFailedListener;
 import com.gustavoronchi.microsservico_pedido.resource.OrderResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -65,7 +67,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
 @Import({OrderService.class, StockReservedListener.class,
-        PaymentApprovedListener.class, OrderServiceTests.JsonConfig.class})
+        PaymentApprovedListener.class, StockReservationFailedListener.class, OrderServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class OrderServiceTests {
 
@@ -83,6 +85,8 @@ class OrderServiceTests {
     private StockReservedListener stockReservedListener;
     @Autowired
     private PaymentApprovedListener paymentApprovedListener;
+    @Autowired
+    private StockReservationFailedListener stockReservationFailedListener;
 
     private MockMvc mvc;
     private final UUID firstProductId = UUID.randomUUID();
@@ -414,6 +418,74 @@ class OrderServiceTests {
 
         assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
         assertThat(events.findAll()).hasSize(1);
+    }
+
+    @Test
+    void concurrentStockFailuresCancelCreatedOrderOnlyOnceAndLateEventsKeepCanceled() throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        StockReservationFailedEvent event = failedEvent(orderId);
+        concurrently(() -> { stockReservationFailedListener.hearStockReservationFailed(event); return true; },
+                () -> { stockReservationFailedListener.hearStockReservationFailed(event); return true; });
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+
+        stockReservationFailedListener.hearStockReservationFailed(event);
+        stockReservedListener.hearStockReserved(reservedEvent(orderId));
+        paymentApprovedListener.hearPaymentApproved(approvedEvent(orderId));
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CANCELED);
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(result -> assertThat(result.getExchange()).isEqualTo("order.created"));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = StatusOrder.class, names = "CREATED", mode = EnumSource.Mode.EXCLUDE)
+    void lateStockFailurePreservesExistingStatusAndUpdatedAt(StatusOrder status) {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        var order = orders.findById(orderId).orElseThrow();
+        order.setStatus(status);
+        orders.saveAndFlush(order);
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+
+        stockReservationFailedListener.hearStockReservationFailed(failedEvent(orderId));
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(status);
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    @Test
+    void unknownOrderIsRejectedInsteadOfBeingCreatedByStockFailure() {
+        assertThatThrownBy(() -> stockReservationFailedListener.hearStockReservationFailed(failedEvent(UUID.randomUUID())))
+                .isInstanceOf(OrderNotFoundException.class);
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"event", "eventId", "orderId", "occurredAt", "failureReason", "blankReason"})
+    void malformedStockFailureDoesNotCancelOrder(String invalidField) {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        StockReservationFailedEvent event = failedEvent(orderId);
+        switch (invalidField) {
+            case "event" -> event = null;
+            case "eventId" -> event.setEventId(null);
+            case "orderId" -> event.setOrderId(null);
+            case "occurredAt" -> event.setOccurredAt(null);
+            case "failureReason" -> event.setFailureReason(null);
+            case "blankReason" -> event.setFailureReason(" ");
+            default -> throw new IllegalArgumentException(invalidField);
+        }
+        StockReservationFailedEvent invalidEvent = event;
+
+        assertThatThrownBy(() -> stockReservationFailedListener.hearStockReservationFailed(invalidEvent))
+                .isInstanceOf(InvalidOrderRequestException.class);
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    private StockReservationFailedEvent failedEvent(UUID orderId) {
+        return new StockReservationFailedEvent(UUID.randomUUID(), orderId, Instant.now(), "Estoque insuficiente");
     }
 
     private PaymentApprovedEvent approvedEvent(UUID orderId) {
