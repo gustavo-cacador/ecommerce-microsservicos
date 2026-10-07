@@ -56,8 +56,10 @@ class ProductPricesTests {
                 .andExpect(jsonPath("$.length()").value(2))
                 .andExpect(jsonPath("$[0].productId").value(second.getId().toString()))
                 .andExpect(jsonPath("$[0].price").value(21.50))
+                .andExpect(jsonPath("$[0].availableStock").value(0))
                 .andExpect(jsonPath("$[1].productId").value(first.getId().toString()))
-                .andExpect(jsonPath("$[1].price").value(10.00));
+                .andExpect(jsonPath("$[1].price").value(10.00))
+                .andExpect(jsonPath("$[1].availableStock").value(3));
 
         Product persisted = products.findById(first.getId()).orElseThrow();
         assertThat(persisted.getQuantityAvailable()).isEqualTo(5);

@@ -7,13 +7,15 @@ public class ProductPriceDTO {
 
     private UUID productId;
     private BigDecimal price;
+    private Integer availableStock;
 
     public ProductPriceDTO() {
     }
 
-    public ProductPriceDTO(UUID productId, BigDecimal price) {
+    public ProductPriceDTO(UUID productId, BigDecimal price, Integer availableStock) {
         this.productId = productId;
         this.price = price;
+        this.availableStock = availableStock;
     }
 
     public UUID getProductId() {
@@ -30,5 +32,13 @@ public class ProductPriceDTO {
 
     public void setPrice(BigDecimal price) {
         this.price = price;
+    }
+
+    public Integer getAvailableStock() {
+        return availableStock;
+    }
+
+    public void setAvailableStock(Integer availableStock) {
+        this.availableStock = availableStock;
     }
 }

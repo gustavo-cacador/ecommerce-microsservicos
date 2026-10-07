@@ -97,10 +97,10 @@ class OrderServiceTests {
     void setUp() {
         events.deleteAll();
         orders.deleteAll();
-        firstPrice = new ProductPriceDTO(firstProductId, new BigDecimal("10.00"));
+        firstPrice = new ProductPriceDTO(firstProductId, new BigDecimal("10.00"), 50);
         when(stockClient.findPrices(any())).thenAnswer(invocation -> {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-            return List.of(firstPrice, new ProductPriceDTO(secondProductId, new BigDecimal("20.00")));
+            return List.of(firstPrice, new ProductPriceDTO(secondProductId, new BigDecimal("20.00"), 50));
         });
         mvc = MockMvcBuilders.standaloneSetup(new OrderResource(orderService)).build();
     }
@@ -199,6 +199,91 @@ class OrderServiceTests {
         assertThatThrownBy(() -> orderService.createOrder(request(1)))
                 .isInstanceOf(IllegalStateException.class);
 
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 50})
+    void insufficientStockReturnsConflictWithoutCreatingOrderOrOutbox(int available) throws Exception {
+        firstPrice.setAvailableStock(available);
+        String message = available == 0
+                ? "Produto fora de estoque: " + firstProductId
+                : "Estoque insuficiente para o produto " + firstProductId + ". Disponível: " + available;
+
+        mvc.perform(post("/orders").contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonMapper.writeValueAsString(request(available + 1))))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(message));
+
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @Test
+    void repeatedProductsAreCheckedByTheirTotalQuantity() throws Exception {
+        firstPrice.setAvailableStock(4);
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, 2), new OrderItemRequestDTO(firstProductId, 3)));
+
+        mvc.perform(post("/orders").contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonMapper.writeValueAsString(request)))
+                .andExpect(status().isConflict());
+
+        verify(stockClient).findPrices(List.of(firstProductId));
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @Test
+    void exactAvailableQuantityAllowsOrderCreation() {
+        firstPrice.setAvailableStock(5);
+
+        var order = orderService.createOrder(request(5));
+
+        assertThat(order.getStatus()).isEqualTo(StatusOrder.CREATED);
+        assertThat(order.getTotalValue()).isEqualByComparingTo("50.00");
+        assertThat(orders.count()).isEqualTo(1);
+        assertThat(events.count()).isEqualTo(1);
+    }
+
+    @Test
+    void oneUnavailableProductRejectsWholeOrder() throws Exception {
+        when(stockClient.findPrices(any())).thenReturn(List.of(firstPrice,
+                new ProductPriceDTO(secondProductId, new BigDecimal("20.00"), 0)));
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, 1), new OrderItemRequestDTO(secondProductId, 1)));
+
+        mvc.perform(post("/orders").contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonMapper.writeValueAsString(request)))
+                .andExpect(status().isConflict());
+
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(ints = {-1})
+    void missingOrInvalidAvailabilityReturns503WithoutCreatingOrder(Integer available) throws Exception {
+        firstPrice.setAvailableStock(available);
+
+        mvc.perform(post("/orders").contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonMapper.writeValueAsString(request(1))))
+                .andExpect(status().isServiceUnavailable());
+
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @Test
+    void combinedQuantityOverflowIsRejectedBeforeConsultingCatalog() {
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, Integer.MAX_VALUE), new OrderItemRequestDTO(firstProductId, 1)));
+
+        assertThatThrownBy(() -> orderService.createOrder(request)).isInstanceOf(InvalidOrderRequestException.class);
+
+        verifyNoInteractions(stockClient);
         assertThat(orders.findAll()).isEmpty();
         assertThat(events.findAll()).isEmpty();
     }

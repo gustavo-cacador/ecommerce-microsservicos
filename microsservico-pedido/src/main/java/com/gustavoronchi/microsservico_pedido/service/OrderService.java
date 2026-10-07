@@ -10,6 +10,7 @@ import com.gustavoronchi.microsservico_pedido.domain.repository.OutboxEventRepos
 import com.gustavoronchi.microsservico_pedido.dto.*;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import com.gustavoronchi.microsservico_pedido.exception.InvalidOrderRequestException;
+import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockException;
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
 import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
@@ -26,6 +27,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -113,10 +115,18 @@ public class OrderService {
             throw new InvalidOrderRequestException("Informe cliente e itens com produto e quantidade positiva.");
         }
 
+        Map<UUID, Integer> quantities = new LinkedHashMap<>();
+        for (OrderItemRequestDTO item : request.getItems()) {
+            try {
+                quantities.merge(item.getProductId(), item.getQuantity(), Math::addExact);
+            } catch (ArithmeticException ex) {
+                throw new InvalidOrderRequestException("Quantidade total excede o limite para o produto " + item.getProductId());
+            }
+        }
+
         List<ProductPriceDTO> prices;
         try {
-            prices = stockClient.findPrices(request.getItems().stream()
-                    .map(OrderItemRequestDTO::getProductId).distinct().toList());
+            prices = stockClient.findPrices(List.copyOf(quantities.keySet()));
         } catch (HttpClientErrorException.NotFound ex) {
             throw new InvalidOrderRequestException("Pedido contém produto inexistente ou inativo.");
         } catch (RestClientException ex) {
@@ -124,6 +134,22 @@ public class OrderService {
         }
         if (prices == null) {
             throw new StockUnavailableException("Catálogo retornou uma resposta vazia.");
+        }
+        for (ProductPriceDTO product : prices) {
+            Integer requested = quantities.get(product.getProductId());
+            if (requested == null) {
+                continue;
+            }
+            Integer available = product.getAvailableStock();
+            if (available == null || available < 0) {
+                throw new StockUnavailableException("Catálogo não retornou disponibilidade válida para o produto " + product.getProductId());
+            }
+            if (requested > available) {
+                String message = available == 0
+                        ? "Produto fora de estoque: " + product.getProductId()
+                        : "Estoque insuficiente para o produto " + product.getProductId() + ". Disponível: " + available;
+                throw new InsufficientStockException(message);
+            }
         }
         return transactionTemplate.execute(status -> create(request, prices));
     }

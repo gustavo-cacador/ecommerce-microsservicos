@@ -3,15 +3,18 @@ package com.gustavoronchi.microsservico_pedido.resource;
 import com.gustavoronchi.microsservico_pedido.dto.OrderRequestDTO;
 import com.gustavoronchi.microsservico_pedido.dto.OrderResponseDTO;
 import com.gustavoronchi.microsservico_pedido.dto.UpdateStatusRequestDTO;
+import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockException;
 import com.gustavoronchi.microsservico_pedido.service.OrderService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.net.URI;
 import java.util.UUID;
+import java.util.Map;
 
 @RestController
 @RequestMapping("orders")
@@ -21,6 +24,11 @@ public class OrderResource {
 
     public OrderResource(OrderService orderService) {
         this.orderService = orderService;
+    }
+
+    @ExceptionHandler(InsufficientStockException.class)
+    public ResponseEntity<Map<String, String>> handleInsufficientStock(InsufficientStockException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("message", exception.getMessage()));
     }
 
     @GetMapping("{id}")

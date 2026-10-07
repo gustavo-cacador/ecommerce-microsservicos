@@ -64,7 +64,8 @@ public class ProductService {
             if (product == null || !Boolean.TRUE.equals(product.getActive())) {
                 throw new ProductNotFoundException("Produto com id: " + id + " não encontrado.");
             }
-            return new ProductPriceDTO(product.getId(), product.getPrice());
+            int availableStock = Math.max(0, product.getQuantityAvailable() - product.getQuantityReserved());
+            return new ProductPriceDTO(product.getId(), product.getPrice(), availableStock);
         }).toList();
     }
 
