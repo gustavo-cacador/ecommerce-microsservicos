@@ -16,6 +16,8 @@ import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedEvent;
 import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedListener;
 import com.gustavoronchi.microsservico_estoque.messaging.StockReservedEvent;
 import com.gustavoronchi.microsservico_estoque.messaging.StockReservationFailedEvent;
+import com.gustavoronchi.microsservico_estoque.messaging.PaymentApprovedEvent;
+import com.gustavoronchi.microsservico_estoque.messaging.PaymentApprovedListener;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
@@ -49,7 +51,8 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
-@Import({StockService.class, StockActionListener.class, OrderCreatedListener.class, StockServiceTests.JsonConfig.class})
+@Import({StockService.class, StockActionListener.class, OrderCreatedListener.class,
+        PaymentApprovedListener.class, StockServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class StockServiceTests {
 
@@ -63,6 +66,8 @@ class StockServiceTests {
     private StockActionListener listener;
     @Autowired
     private OrderCreatedListener orderCreatedListener;
+    @Autowired
+    private PaymentApprovedListener paymentApprovedListener;
     @MockitoSpyBean
     private OutboxEventRepository outbox;
     @Autowired
@@ -394,6 +399,128 @@ class StockServiceTests {
         JsonMapper jsonMapper() {
             return JsonMapper.builder().build();
         }
+    }
+
+    @Test
+    void repeatedPaymentApprovalConfirmsPersistedItemsOnlyOnce() throws Exception {
+        Product first = product(5);
+        Product second = product(7);
+        UUID orderId = UUID.randomUUID();
+        service.reserve(orderId, List.of(item(first, 2), item(second, 3)));
+        service.reserve(UUID.randomUUID(), List.of(item(first, 1)));
+        PaymentApprovedEvent event = approval(orderId);
+
+        concurrently(() -> { paymentApprovedListener.hearPaymentApproved(event); return true; },
+                () -> { paymentApprovedListener.hearPaymentApproved(event); return true; });
+        paymentApprovedListener.hearPaymentApproved(event);
+        event.setEventId(UUID.randomUUID());
+        paymentApprovedListener.hearPaymentApproved(event);
+
+        assertStock(first, 3, 1);
+        assertStock(second, 4, 0);
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.CONFIRMED);
+    }
+
+    @Test
+    void approvalWithAnotherOrdersReservationIsRejectedEvenAfterConfirmation() {
+        Product product = product(5);
+        UUID firstOrder = UUID.randomUUID();
+        UUID secondOrder = UUID.randomUUID();
+        service.reserve(firstOrder, List.of(item(product, 2)));
+        service.reserve(secondOrder, List.of(item(product, 1)));
+        PaymentApprovedEvent event = approval(firstOrder);
+        event.setReservationId(reservations.findByOrderId(secondOrder).orElseThrow().getId());
+
+        assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(event))
+                .isInstanceOf(StockInconsistencyException.class);
+        assertStock(product, 5, 3);
+        assertThat(reservations.findByOrderId(firstOrder).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RESERVED);
+
+        paymentApprovedListener.hearPaymentApproved(approval(firstOrder));
+        assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(event))
+                .isInstanceOf(StockInconsistencyException.class);
+        assertStock(product, 3, 1);
+        assertThat(reservations.findByOrderId(secondOrder).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RESERVED);
+    }
+
+    @Test
+    void approvalCannotConfirmReleasedReservationOrUnknownOrder() {
+        Product product = product(5);
+        UUID orderId = UUID.randomUUID();
+        service.reserve(orderId, List.of(item(product, 2)));
+        PaymentApprovedEvent event = approval(orderId);
+        service.release(orderId);
+
+        assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(event))
+                .isInstanceOf(StockInconsistencyException.class);
+        event.setOrderId(UUID.randomUUID());
+        assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(event))
+                .isInstanceOf(StockReservationNotFoundException.class);
+        assertStock(product, 5, 0);
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RELEASED);
+    }
+
+    @Test
+    void failureDuringPaymentConfirmationRollsBackAllItems() {
+        List<Product> ordered = new ArrayList<>(List.of(product(5), product(5)));
+        ordered.sort(Comparator.comparing(Product::getId));
+        UUID orderId = UUID.randomUUID();
+        service.reserve(orderId, List.of(item(ordered.get(0), 2), item(ordered.get(1), 2)));
+        Product inconsistent = products.findById(ordered.get(1).getId()).orElseThrow();
+        inconsistent.setQuantityReserved(0);
+        products.saveAndFlush(inconsistent);
+
+        assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(approval(orderId)))
+                .isInstanceOf(StockInconsistencyException.class);
+
+        assertStock(ordered.getFirst(), 5, 2);
+        assertStock(ordered.get(1), 5, 0);
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RESERVED);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "eventId", "orderId", "occurredAt", "paymentId", "reservationId",
+            "amount", "negativeAmount", "currency", "foreignCurrency"})
+    void invalidApprovalDoesNotChangeReservation(String field) {
+        Product product = product(5);
+        UUID orderId = UUID.randomUUID();
+        service.reserve(orderId, List.of(item(product, 2)));
+        PaymentApprovedEvent event = approval(orderId);
+        switch (field) {
+            case "null" -> event = null;
+            case "eventId" -> event.setEventId(null);
+            case "orderId" -> event.setOrderId(null);
+            case "occurredAt" -> event.setOccurredAt(null);
+            case "paymentId" -> event.setPaymentId(null);
+            case "reservationId" -> event.setReservationId(null);
+            case "amount" -> event.setAmount(null);
+            case "negativeAmount" -> event.setAmount(new BigDecimal("-1.00"));
+            case "currency" -> event.setCurrency(null);
+            case "foreignCurrency" -> event.setCurrency("USD");
+        }
+        PaymentApprovedEvent invalid = event;
+
+        assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(invalid))
+                .isInstanceOf(InvalidStockRequestException.class);
+        assertStock(product, 5, 2);
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RESERVED);
+    }
+
+    @Test
+    void confirmationWithNullReservationIdIsRejected() {
+        assertThatThrownBy(() -> service.confirm(UUID.randomUUID(), null))
+                .isInstanceOf(InvalidStockRequestException.class);
+    }
+
+    private PaymentApprovedEvent approval(UUID orderId) {
+        return new PaymentApprovedEvent(UUID.randomUUID(), orderId, Instant.now(), UUID.randomUUID(),
+                reservations.findByOrderId(orderId).orElseThrow().getId(), new BigDecimal("12.34"), "BRL");
     }
 
     private Product product(int quantity) {

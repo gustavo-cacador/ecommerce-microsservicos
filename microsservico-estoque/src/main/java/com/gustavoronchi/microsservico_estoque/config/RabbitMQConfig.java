@@ -38,6 +38,43 @@ public class RabbitMQConfig {
     public static final String STOCK_RELEASE_DLQ = "stock.release.dlq";
     public static final String STOCK_RELEASE_DLX = "stock.release.dlx";
 
+    public static final String PAYMENT_APPROVED_EXCHANGE = "payment.approved";
+    public static final String STOCK_PAYMENT_APPROVED_QUEUE = "stock.payment.approved.queue";
+    public static final String STOCK_PAYMENT_APPROVED_DLQ = "stock.payment.approved.dlq";
+    public static final String STOCK_PAYMENT_APPROVED_DLX = "stock.payment.approved.dlx";
+
+    @Bean
+    public FanoutExchange paymentApprovedExchange() {
+        return new FanoutExchange(PAYMENT_APPROVED_EXCHANGE);
+    }
+
+    @Bean
+    public Queue stockPaymentApprovedQueue() {
+        return QueueBuilder.durable(STOCK_PAYMENT_APPROVED_QUEUE)
+                .withArgument("x-dead-letter-exchange", STOCK_PAYMENT_APPROVED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange stockPaymentApprovedDlx() {
+        return new FanoutExchange(STOCK_PAYMENT_APPROVED_DLX);
+    }
+
+    @Bean
+    public Queue stockPaymentApprovedDlq() {
+        return QueueBuilder.durable(STOCK_PAYMENT_APPROVED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindStockPaymentApprovedQueue() {
+        return BindingBuilder.bind(stockPaymentApprovedQueue()).to(paymentApprovedExchange());
+    }
+
+    @Bean
+    public Binding bindStockPaymentApprovedDlq() {
+        return BindingBuilder.bind(stockPaymentApprovedDlq()).to(stockPaymentApprovedDlx());
+    }
+
     @Bean
     public FanoutExchange orderCreatedExchange() {
         return new FanoutExchange(ORDER_CREATED_EXCHANGE);
