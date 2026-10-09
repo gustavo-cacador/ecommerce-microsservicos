@@ -88,13 +88,51 @@ class PaymentListenerRabbitTests {
         assertThat(approval.getReservationId()).isEqualTo(payments.findAll().getFirst().getReservationId());
 
         rabbit.send(RabbitMQConfig.PAYMENT_APPROVED_EXCHANGE, "", orderCopy);
-        rejectApproval(RabbitMQConfig.ORDER_PAYMENT_APPROVED_QUEUE);
-        rejectApproval(RabbitMQConfig.STOCK_PAYMENT_APPROVED_QUEUE);
+        rejectResult(RabbitMQConfig.ORDER_PAYMENT_APPROVED_QUEUE);
+        rejectResult(RabbitMQConfig.STOCK_PAYMENT_APPROVED_QUEUE);
         assertThat(rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_APPROVED_DLQ, 5000)).isNotNull();
         assertThat(rabbit.receive(RabbitMQConfig.STOCK_PAYMENT_APPROVED_DLQ, 5000)).isNotNull();
+
+        UUID refusedOrderId = UUID.randomUUID();
+        String refusedPayload = """
+                {"eventId":"%s","orderId":"%s","occurredAt":"2026-10-09T12:00:00Z",
+                 "reservationId":"%s","amount":599.80,"currency":"BRL"}
+                """.formatted(UUID.randomUUID(), refusedOrderId, UUID.randomUUID());
+        doReturn(PaymentStatus.REFUSED).when(gateway).process(any(), any(), any());
+        publish(refusedPayload);
+        await(() -> events.count() == 2 && events.findAll().stream()
+                .filter(event -> event.getOrderId().equals(refusedOrderId))
+                .anyMatch(event -> event.getPublishedAt() != null));
+        publish(refusedPayload);
+        await(() -> Boolean.TRUE.equals(rabbit.execute(channel -> channel.messageCount(
+                RabbitMQConfig.PAYMENT_STOCK_RESERVED_QUEUE) == 0)));
+        var refusalOutbox = events.findAll().stream()
+                .filter(event -> event.getOrderId().equals(refusedOrderId)).toList();
+        assertThat(refusalOutbox).hasSize(1);
+        assertThat(refusalOutbox.getFirst().getExchange()).isEqualTo(RabbitMQConfig.PAYMENT_REFUSED_EXCHANGE);
+        Message refusedOrderCopy = rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_REFUSED_QUEUE, 5000);
+        Message refusedStockCopy = rabbit.receive(RabbitMQConfig.STOCK_PAYMENT_REFUSED_QUEUE, 5000);
+        assertThat(refusedOrderCopy).isNotNull();
+        assertThat(refusedStockCopy).isNotNull();
+        assertThat(refusedStockCopy.getBody()).isEqualTo(refusedOrderCopy.getBody());
+        PaymentRefusedEvent refusal = jsonMapper.readValue(refusedOrderCopy.getBody(), PaymentRefusedEvent.class);
+        var refusedPayment = payments.findAll().stream()
+                .filter(payment -> payment.getOrderId().equals(refusedOrderId)).findFirst().orElseThrow();
+        assertThat(refusedPayment.getStatus()).isEqualTo(PaymentStatus.REFUSED);
+        assertThat(refusal.getEventId()).isEqualTo(refusalOutbox.getFirst().getEventId());
+        assertThat(refusal.getOrderId()).isEqualTo(refusedOrderId);
+        assertThat(refusal.getPaymentId()).isEqualTo(refusedPayment.getId());
+        assertThat(refusal.getReservationId()).isEqualTo(refusedPayment.getReservationId());
+        verify(gateway, times(1)).process(refusedOrderId, refusedPayment.getAmount(), "BRL");
+
+        rabbit.send(RabbitMQConfig.PAYMENT_REFUSED_EXCHANGE, "", refusedOrderCopy);
+        rejectResult(RabbitMQConfig.ORDER_PAYMENT_REFUSED_QUEUE);
+        rejectResult(RabbitMQConfig.STOCK_PAYMENT_REFUSED_QUEUE);
+        assertThat(rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_REFUSED_DLQ, 5000)).isNotNull();
+        assertThat(rabbit.receive(RabbitMQConfig.STOCK_PAYMENT_REFUSED_DLQ, 5000)).isNotNull();
     }
 
-    private void rejectApproval(String queue) throws InterruptedException {
+    private void rejectResult(String queue) throws InterruptedException {
         await(() -> Boolean.TRUE.equals(rabbit.execute(channel -> channel.messageCount(queue) > 0)));
         rabbit.execute(channel -> {
             var message = channel.basicGet(queue, false);

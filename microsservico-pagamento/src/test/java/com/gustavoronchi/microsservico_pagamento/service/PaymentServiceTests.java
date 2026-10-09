@@ -10,10 +10,12 @@ import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGatewayUnavailab
 import com.gustavoronchi.microsservico_pagamento.messaging.PaymentListener;
 import com.gustavoronchi.microsservico_pagamento.messaging.StockReservedEvent;
 import com.gustavoronchi.microsservico_pagamento.messaging.PaymentApprovedEvent;
+import com.gustavoronchi.microsservico_pagamento.messaging.PaymentRefusedEvent;
 import com.gustavoronchi.microsservico_pagamento.resource.PaymentResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -109,9 +111,24 @@ class PaymentServiceTests {
     void persistsRefusalWithoutCallingGatewayAgainOnDuplicate() {
         doReturn(PaymentStatus.REFUSED).when(gateway).process(any(), any(), any());
         listener.hearStockReserved(event);
+        Payment first = onlyPayment();
+        UUID refusalEventId = events.findAll().getFirst().getEventId();
         listener.hearStockReserved(event);
         assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.REFUSED);
-        assertThat(events.count()).isZero();
+        assertThat(onlyPayment().getId()).isEqualTo(first.getId());
+        assertThat(events.findAll()).hasSize(1);
+        var outbox = events.findAll().getFirst();
+        assertThat(outbox.getEventId()).isEqualTo(refusalEventId);
+        assertThat(outbox.getPublishedAt()).isNull();
+        assertThat(outbox.getExchange()).isEqualTo("payment.refused");
+        PaymentRefusedEvent refusal = jsonMapper.readValue(outbox.getPayload(), PaymentRefusedEvent.class);
+        assertThat(refusal.getEventId()).isEqualTo(outbox.getEventId());
+        assertThat(refusal.getOrderId()).isEqualTo(first.getOrderId());
+        assertThat(refusal.getPaymentId()).isEqualTo(first.getId());
+        assertThat(refusal.getReservationId()).isEqualTo(first.getReservationId());
+        assertThat(refusal.getOccurredAt()).isEqualTo(outbox.getOccurredAt());
+        assertThat(refusal.getAmount()).isEqualByComparingTo(first.getAmount());
+        assertThat(refusal.getCurrency()).isEqualTo("BRL");
         verify(gateway, times(1)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
@@ -135,14 +152,15 @@ class PaymentServiceTests {
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
-    @Test
-    void simultaneousFirstDeliveriesCreateOnePaymentAndUseTheSameProviderKey() throws Exception {
+    @ParameterizedTest
+    @EnumSource(value = PaymentStatus.class, names = {"APPROVED", "REFUSED"})
+    void simultaneousFirstDeliveriesCreateOnePaymentAndUseTheSameProviderKey(PaymentStatus result) throws Exception {
         CountDownLatch gatewayCalls = new CountDownLatch(2);
         doAnswer(invocation -> {
             assertPendingOutsideTransaction();
             gatewayCalls.countDown();
             assertThat(gatewayCalls.await(10, TimeUnit.SECONDS)).isTrue();
-            return PaymentStatus.APPROVED;
+            return result;
         }).when(gateway).process(any(), any(), any());
         try (var executor = Executors.newFixedThreadPool(2)) {
             var first = executor.submit(() -> listener.hearStockReserved(event));
@@ -150,7 +168,7 @@ class PaymentServiceTests {
             first.get(15, TimeUnit.SECONDS);
             second.get(15, TimeUnit.SECONDS);
         }
-        assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.APPROVED);
+        assertThat(onlyPayment().getStatus()).isEqualTo(result);
         assertThat(events.count()).isEqualTo(1);
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
@@ -174,8 +192,10 @@ class PaymentServiceTests {
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }
 
-    @Test
-    void outboxFailureRollsBackApprovalAndRetryCreatesOneEvent() {
+    @ParameterizedTest
+    @EnumSource(value = PaymentStatus.class, names = {"APPROVED", "REFUSED"})
+    void outboxFailureRollsBackResultAndRetryCreatesOneEvent(PaymentStatus result) {
+        doReturn(result).when(gateway).process(any(), any(), any());
         doThrow(new DataAccessResourceFailureException("Falha na outbox")).when(events).save(any());
 
         assertThatThrownBy(() -> listener.hearStockReserved(event))
@@ -186,7 +206,7 @@ class PaymentServiceTests {
         reset(events);
         listener.hearStockReserved(event);
         listener.hearStockReserved(event);
-        assertThat(onlyPayment().getStatus()).isEqualTo(PaymentStatus.APPROVED);
+        assertThat(onlyPayment().getStatus()).isEqualTo(result);
         assertThat(events.count()).isEqualTo(1);
         verify(gateway, times(2)).process(event.getOrderId(), event.getAmount(), "BRL");
     }

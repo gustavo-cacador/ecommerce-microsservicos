@@ -12,6 +12,7 @@ import com.gustavoronchi.microsservico_pagamento.exception.InvalidPaymentRequest
 import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGateway;
 import com.gustavoronchi.microsservico_pagamento.messaging.StockReservedEvent;
 import com.gustavoronchi.microsservico_pagamento.messaging.PaymentApprovedEvent;
+import com.gustavoronchi.microsservico_pagamento.messaging.PaymentRefusedEvent;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -72,6 +73,8 @@ public class PaymentService {
                 current.setStatus(result);
                 if (result == PaymentStatus.APPROVED && current.getReservationId() != null) {
                     saveApprovalEvent(current);
+                } else if (result == PaymentStatus.REFUSED && current.getReservationId() != null) {
+                    saveRefusalEvent(current);
                 }
             }
             return new PaymentResponseDTO(current);
@@ -85,6 +88,18 @@ public class PaymentService {
         outbox.setRoutingKey("");
         outbox.setOccurredAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
         PaymentApprovedEvent event = new PaymentApprovedEvent(outbox.getEventId(), payment.getOrderId(),
+                outbox.getOccurredAt(), payment.getId(), payment.getReservationId(), payment.getAmount(), payment.getCurrency());
+        outbox.setPayload(jsonMapper.writeValueAsString(event));
+        outboxRepository.save(outbox);
+    }
+
+    private void saveRefusalEvent(Payment payment) {
+        OutboxEvent outbox = new OutboxEvent();
+        outbox.setOrderId(payment.getOrderId());
+        outbox.setExchange(RabbitMQConfig.PAYMENT_REFUSED_EXCHANGE);
+        outbox.setRoutingKey("");
+        outbox.setOccurredAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        PaymentRefusedEvent event = new PaymentRefusedEvent(outbox.getEventId(), payment.getOrderId(),
                 outbox.getOccurredAt(), payment.getId(), payment.getReservationId(), payment.getAmount(), payment.getCurrency());
         outbox.setPayload(jsonMapper.writeValueAsString(event));
         outboxRepository.save(outbox);
