@@ -43,6 +43,43 @@ public class RabbitMQConfig {
     public static final String STOCK_PAYMENT_APPROVED_DLQ = "stock.payment.approved.dlq";
     public static final String STOCK_PAYMENT_APPROVED_DLX = "stock.payment.approved.dlx";
 
+    public static final String PAYMENT_REFUSED_EXCHANGE = "payment.refused";
+    public static final String STOCK_PAYMENT_REFUSED_QUEUE = "stock.payment.refused.queue";
+    public static final String STOCK_PAYMENT_REFUSED_DLQ = "stock.payment.refused.dlq";
+    public static final String STOCK_PAYMENT_REFUSED_DLX = "stock.payment.refused.dlx";
+
+    @Bean
+    public FanoutExchange paymentRefusedExchange() {
+        return new FanoutExchange(PAYMENT_REFUSED_EXCHANGE);
+    }
+
+    @Bean
+    public Queue stockPaymentRefusedQueue() {
+        return QueueBuilder.durable(STOCK_PAYMENT_REFUSED_QUEUE)
+                .withArgument("x-dead-letter-exchange", STOCK_PAYMENT_REFUSED_DLX)
+                .build();
+    }
+
+    @Bean
+    public FanoutExchange stockPaymentRefusedDlx() {
+        return new FanoutExchange(STOCK_PAYMENT_REFUSED_DLX);
+    }
+
+    @Bean
+    public Queue stockPaymentRefusedDlq() {
+        return QueueBuilder.durable(STOCK_PAYMENT_REFUSED_DLQ).build();
+    }
+
+    @Bean
+    public Binding bindStockPaymentRefusedQueue() {
+        return BindingBuilder.bind(stockPaymentRefusedQueue()).to(paymentRefusedExchange());
+    }
+
+    @Bean
+    public Binding bindStockPaymentRefusedDlq() {
+        return BindingBuilder.bind(stockPaymentRefusedDlq()).to(stockPaymentRefusedDlx());
+    }
+
     @Bean
     public FanoutExchange paymentApprovedExchange() {
         return new FanoutExchange(PAYMENT_APPROVED_EXCHANGE);

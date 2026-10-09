@@ -161,6 +161,14 @@ public class StockService {
     }
 
     @Transactional
+    public void release(UUID orderId, UUID reservationId) {
+        if (reservationId == null) {
+            throw new InvalidStockRequestException("Informe a reserva do pedido.");
+        }
+        finishReservation(orderId, reservationId, ReservationStatus.RELEASED);
+    }
+
+    @Transactional
     public void confirm(UUID orderId) {
         finishReservation(orderId, null, ReservationStatus.CONFIRMED);
     }
