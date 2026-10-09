@@ -99,6 +99,19 @@ public class OrderService {
     }
 
     @Transactional
+    public void cancelForPaymentRefusal(UUID orderId, BigDecimal amount) {
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + orderId + " não encontrado."));
+        if (amount == null || order.getTotalValue().compareTo(amount) != 0) {
+            throw new InvalidOrderRequestException("Valor do pagamento diferente do total do pedido: " + orderId);
+        }
+        if (order.getStatus() == StatusOrder.CREATED || order.getStatus() == StatusOrder.WAITING_PAYMENT) {
+            order.setStatus(StatusOrder.CANCELED);
+            order.setUpdatedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
+        }
+    }
+
+    @Transactional
     public void cancelForStockFailure(UUID orderId) {
         Order order = orderRepository.findByIdForUpdate(orderId)
                 .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + orderId + " não encontrado."));

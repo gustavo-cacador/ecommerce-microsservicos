@@ -14,6 +14,8 @@ import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.PaymentApprovedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.PaymentApprovedListener;
+import com.gustavoronchi.microsservico_pedido.messaging.PaymentRefusedEvent;
+import com.gustavoronchi.microsservico_pedido.messaging.PaymentRefusedListener;
 import com.gustavoronchi.microsservico_pedido.messaging.StockReservedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.StockReservedListener;
 import com.gustavoronchi.microsservico_pedido.messaging.StockReservationFailedEvent;
@@ -67,7 +69,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
 @Import({OrderService.class, StockReservedListener.class,
-        PaymentApprovedListener.class, StockReservationFailedListener.class, OrderServiceTests.JsonConfig.class})
+        PaymentApprovedListener.class, PaymentRefusedListener.class,
+        StockReservationFailedListener.class, OrderServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class OrderServiceTests {
 
@@ -85,6 +88,8 @@ class OrderServiceTests {
     private StockReservedListener stockReservedListener;
     @Autowired
     private PaymentApprovedListener paymentApprovedListener;
+    @Autowired
+    private PaymentRefusedListener paymentRefusedListener;
     @Autowired
     private StockReservationFailedListener stockReservationFailedListener;
 
@@ -567,6 +572,106 @@ class OrderServiceTests {
                 .isInstanceOf(InvalidOrderRequestException.class);
         assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
         assertThat(events.findAll()).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = StatusOrder.class, names = {"CREATED", "WAITING_PAYMENT"})
+    void concurrentRefusalsCancelOrderOnceAndLateEventsKeepCanceled(StatusOrder status) throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        var order = orders.findById(orderId).orElseThrow();
+        order.setStatus(status);
+        orders.saveAndFlush(order);
+        PaymentRefusedEvent event = refusedEvent(orderId);
+
+        concurrently(() -> { paymentRefusedListener.hearPaymentRefused(event); return true; },
+                () -> { paymentRefusedListener.hearPaymentRefused(event); return true; });
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+        paymentRefusedListener.hearPaymentRefused(event);
+        stockReservedListener.hearStockReserved(reservedEvent(orderId));
+        paymentApprovedListener.hearPaymentApproved(approvedEvent(orderId));
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CANCELED);
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(result -> assertThat(result.getExchange()).isEqualTo("order.created"));
+    }
+
+    @Test
+    void concurrentRefusalAndReservationKeepCanceledStatus() throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+
+        concurrently(() -> { paymentRefusedListener.hearPaymentRefused(refusedEvent(orderId)); return true; },
+                () -> { stockReservedListener.hearStockReserved(reservedEvent(orderId)); return true; });
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CANCELED);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = StatusOrder.class, names = {"CREATED", "WAITING_PAYMENT"}, mode = EnumSource.Mode.EXCLUDE)
+    void lateRefusalPreservesExistingStatusAndUpdatedAt(StatusOrder status) {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        var order = orders.findById(orderId).orElseThrow();
+        order.setStatus(status);
+        orders.saveAndFlush(order);
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+
+        paymentRefusedListener.hearPaymentRefused(refusedEvent(orderId));
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(status);
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+    }
+
+    @Test
+    void mismatchedRefusalAmountDoesNotCancelOrder() {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        PaymentRefusedEvent event = refusedEvent(orderId);
+        event.setAmount(new BigDecimal("99.00"));
+
+        assertThatThrownBy(() -> paymentRefusedListener.hearPaymentRefused(event))
+                .isInstanceOf(InvalidOrderRequestException.class);
+
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
+    }
+
+    @Test
+    void unknownOrderIsRejectedInsteadOfBeingCreatedByRefusal() {
+        assertThatThrownBy(() -> paymentRefusedListener.hearPaymentRefused(refusedEvent(UUID.randomUUID())))
+                .isInstanceOf(OrderNotFoundException.class);
+        assertThat(orders.findAll()).isEmpty();
+        assertThat(events.findAll()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"event", "eventId", "orderId", "occurredAt", "paymentId", "reservationId",
+            "amount", "negativeAmount", "currency", "foreignCurrency"})
+    void malformedRefusalDoesNotCancelOrder(String invalidField) {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        PaymentRefusedEvent event = refusedEvent(orderId);
+        switch (invalidField) {
+            case "event" -> event = null;
+            case "eventId" -> event.setEventId(null);
+            case "orderId" -> event.setOrderId(null);
+            case "occurredAt" -> event.setOccurredAt(null);
+            case "paymentId" -> event.setPaymentId(null);
+            case "reservationId" -> event.setReservationId(null);
+            case "amount" -> event.setAmount(null);
+            case "negativeAmount" -> event.setAmount(new BigDecimal("-1.00"));
+            case "currency" -> event.setCurrency(null);
+            case "foreignCurrency" -> event.setCurrency("USD");
+            default -> throw new IllegalArgumentException(invalidField);
+        }
+        PaymentRefusedEvent invalidEvent = event;
+
+        assertThatThrownBy(() -> paymentRefusedListener.hearPaymentRefused(invalidEvent))
+                .isInstanceOf(InvalidOrderRequestException.class);
+        assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
+        assertThat(events.findAll()).hasSize(1);
+    }
+
+    private PaymentRefusedEvent refusedEvent(UUID orderId) {
+        return new PaymentRefusedEvent(UUID.randomUUID(), orderId, Instant.now(), UUID.randomUUID(),
+                UUID.randomUUID(), new BigDecimal("10.0"), "BRL");
     }
 
     private StockReservationFailedEvent failedEvent(UUID orderId) {
