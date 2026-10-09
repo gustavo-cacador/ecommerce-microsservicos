@@ -63,16 +63,6 @@ public class OrderService {
     }
 
     @Transactional
-    public OrderResponseDTO updateStatus(UUID id, StatusOrder newStatus) {
-        Order order = orderRepository.findById(id)
-                .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + id + " não encontrado."));
-        order.setStatus(newStatus);
-        order.setUpdatedAt(Instant.now());
-        Order updated = orderRepository.save(order);
-        return new OrderResponseDTO(updated);
-    }
-
-    @Transactional
     public void waitForPayment(UUID orderId, BigDecimal amount) {
         Order order = orderRepository.findByIdForUpdate(orderId)
                 .orElseThrow(() -> new OrderNotFoundException("Pedido com id: " + orderId + " não encontrado."));

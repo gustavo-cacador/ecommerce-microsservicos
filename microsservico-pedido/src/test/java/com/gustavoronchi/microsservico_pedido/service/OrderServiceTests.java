@@ -64,6 +64,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -667,6 +669,48 @@ class OrderServiceTests {
                 .isInstanceOf(InvalidOrderRequestException.class);
         assertThat(orderService.findById(orderId).getStatus()).isEqualTo(StatusOrder.CREATED);
         assertThat(events.findAll()).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(StatusOrder.class)
+    void manualStatusChangesReturnNotFoundAndPreserveCreatedOrder(StatusOrder requestedStatus) throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+
+        mvc.perform(patch("/orders/{id}/status", orderId).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"" + requestedStatus + "\"}"))
+                .andExpect(status().isNotFound());
+
+        mvc.perform(get("/orders/{id}", orderId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orderId").value(orderId.toString()))
+                .andExpect(jsonPath("$.status").value("CREATED"));
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(result -> assertThat(result.getExchange()).isEqualTo("order.created"));
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = StatusOrder.class, names = {"PAID", "CANCELED"})
+    void manualStatusChangesCannotReopenFinalOrders(StatusOrder finalStatus) throws Exception {
+        UUID orderId = orderService.createOrder(request(1)).getOrderId();
+        if (finalStatus == StatusOrder.PAID) {
+            paymentApprovedListener.hearPaymentApproved(approvedEvent(orderId));
+        } else {
+            paymentRefusedListener.hearPaymentRefused(refusedEvent(orderId));
+        }
+        Instant updatedAt = orders.findById(orderId).orElseThrow().getUpdatedAt();
+
+        mvc.perform(patch("/orders/{id}/status", orderId).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"CREATED\"}"))
+                .andExpect(status().isNotFound());
+
+        mvc.perform(get("/orders/{id}", orderId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value(finalStatus.name()));
+        assertThat(orders.findById(orderId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(result -> assertThat(result.getExchange()).isEqualTo("order.created"));
     }
 
     private PaymentRefusedEvent refusedEvent(UUID orderId) {

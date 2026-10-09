@@ -2,7 +2,6 @@ package com.gustavoronchi.microsservico_pedido.resource;
 
 import com.gustavoronchi.microsservico_pedido.dto.OrderRequestDTO;
 import com.gustavoronchi.microsservico_pedido.dto.OrderResponseDTO;
-import com.gustavoronchi.microsservico_pedido.dto.UpdateStatusRequestDTO;
 import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockException;
 import com.gustavoronchi.microsservico_pedido.service.OrderService;
 import org.springframework.data.domain.Page;
@@ -39,13 +38,6 @@ public class OrderResource {
     @GetMapping
     public ResponseEntity<Page<OrderResponseDTO>> findAll(Pageable pageable) {
         return ResponseEntity.ok(orderService.findAll(pageable));
-    }
-
-    @PatchMapping("{id}/status")
-    public ResponseEntity<OrderResponseDTO> updateStatus(
-            @PathVariable UUID id,
-            @RequestBody UpdateStatusRequestDTO dto) {
-        return ResponseEntity.ok(orderService.updateStatus(id, dto.getStatus()));
     }
 
     @PostMapping
