@@ -32,7 +32,6 @@ public class RabbitMQConfig {
     public static final String ORDER_PAYMENT_REFUSED_QUEUE = "order.payment.refused.queue";
     public static final String ORDER_PAYMENT_REFUSED_DLQ = "order.payment.refused.dlq";
     public static final String ORDER_PAYMENT_REFUSED_DLX = "order.payment.refused.dlx";
-    public static final String STOCK_RELEASE_EXCHANGE = "stock.release";
 
     @Bean
     public FanoutExchange orderCreatedExchange() {
@@ -165,11 +164,6 @@ public class RabbitMQConfig {
     @Bean
     public Binding bindOrderPaymentRefusedDlq() {
         return BindingBuilder.bind(orderPaymentRefusedDlq()).to(orderPaymentRefusedDlx());
-    }
-
-    @Bean
-    public FanoutExchange stockReleaseExchange() {
-        return new FanoutExchange(STOCK_RELEASE_EXCHANGE);
     }
 
     @Bean

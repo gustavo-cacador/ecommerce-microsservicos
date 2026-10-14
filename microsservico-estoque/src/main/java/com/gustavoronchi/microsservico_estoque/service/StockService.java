@@ -156,21 +156,11 @@ public class StockService {
     }
 
     @Transactional
-    public void release(UUID orderId) {
-        finishReservation(orderId, null, ReservationStatus.RELEASED);
-    }
-
-    @Transactional
     public void release(UUID orderId, UUID reservationId) {
         if (reservationId == null) {
             throw new InvalidStockRequestException("Informe a reserva do pedido.");
         }
         finishReservation(orderId, reservationId, ReservationStatus.RELEASED);
-    }
-
-    @Transactional
-    public void confirm(UUID orderId) {
-        finishReservation(orderId, null, ReservationStatus.CONFIRMED);
     }
 
     @Transactional
@@ -186,7 +176,7 @@ public class StockService {
         StockReservation reservation = reservationRepository.findByOrderIdForUpdate(orderId)
                 .orElseThrow(() -> new StockReservationNotFoundException(orderId));
 
-        if (reservationId != null && !reservation.getId().equals(reservationId)) {
+        if (!reservation.getId().equals(reservationId)) {
             throw new StockInconsistencyException("Reserva informada não pertence ao pedido " + orderId);
         }
         if (reservation.getStatus() == targetStatus) {

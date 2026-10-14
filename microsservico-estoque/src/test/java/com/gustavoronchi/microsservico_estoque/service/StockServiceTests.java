@@ -10,8 +10,6 @@ import com.gustavoronchi.microsservico_estoque.enums.ReservationStatus;
 import com.gustavoronchi.microsservico_estoque.exception.InvalidStockRequestException;
 import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyException;
 import com.gustavoronchi.microsservico_estoque.exception.StockReservationNotFoundException;
-import com.gustavoronchi.microsservico_estoque.messaging.StockActionListener;
-import com.gustavoronchi.microsservico_estoque.messaging.StockActionMessage;
 import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedEvent;
 import com.gustavoronchi.microsservico_estoque.messaging.OrderCreatedListener;
 import com.gustavoronchi.microsservico_estoque.messaging.StockReservedEvent;
@@ -53,7 +51,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
 
 @DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
-@Import({StockService.class, StockActionListener.class, OrderCreatedListener.class,
+@Import({StockService.class, OrderCreatedListener.class,
         PaymentApprovedListener.class, PaymentRefusedListener.class, StockServiceTests.JsonConfig.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class StockServiceTests {
@@ -64,8 +62,6 @@ class StockServiceTests {
     private ProductRepository products;
     @Autowired
     private StockReservationRepository reservations;
-    @Autowired
-    private StockActionListener listener;
     @Autowired
     private OrderCreatedListener orderCreatedListener;
     @Autowired
@@ -340,15 +336,15 @@ class StockServiceTests {
         Product product = product(5);
         UUID orderId = UUID.randomUUID();
         service.reserve(orderId, List.of(item(product, 2)));
-        StockActionMessage message = new StockActionMessage(orderId, List.of(item(product, 100)));
+        UUID reservationId = reservations.findByOrderId(orderId).orElseThrow().getId();
 
-        concurrently(() -> { listener.hearConfirmation(message); return true; },
-                () -> { listener.hearConfirmation(message); return true; });
+        concurrently(() -> { service.confirm(orderId, reservationId); return true; },
+                () -> { service.confirm(orderId, reservationId); return true; });
 
         assertStock(product, 3, 0);
         assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.CONFIRMED);
-        assertThatThrownBy(() -> service.release(orderId)).isInstanceOf(StockInconsistencyException.class);
+        assertThatThrownBy(() -> service.release(orderId, reservationId)).isInstanceOf(StockInconsistencyException.class);
         assertThat(service.reserve(orderId, List.of(item(product, 2))).isSuccess()).isTrue();
         assertStock(product, 3, 0);
     }
@@ -359,15 +355,15 @@ class StockServiceTests {
         UUID orderId = UUID.randomUUID();
         service.reserve(orderId, List.of(item(product, 2)));
         service.reserve(UUID.randomUUID(), List.of(item(product, 3)));
-        StockActionMessage message = new StockActionMessage(orderId, List.of(item(product, 100)));
+        UUID reservationId = reservations.findByOrderId(orderId).orElseThrow().getId();
 
-        concurrently(() -> { listener.hearRelease(message); return true; },
-                () -> { listener.hearRelease(message); return true; });
+        concurrently(() -> { service.release(orderId, reservationId); return true; },
+                () -> { service.release(orderId, reservationId); return true; });
 
         assertStock(product, 5, 3);
         assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.RELEASED);
-        assertThatThrownBy(() -> service.confirm(orderId)).isInstanceOf(StockInconsistencyException.class);
+        assertThatThrownBy(() -> service.confirm(orderId, reservationId)).isInstanceOf(StockInconsistencyException.class);
         assertThatThrownBy(() -> service.reserve(orderId, List.of(item(product, 2))))
                 .isInstanceOf(StockInconsistencyException.class);
     }
@@ -378,11 +374,12 @@ class StockServiceTests {
         ordered.sort(Comparator.comparing(Product::getId));
         UUID orderId = UUID.randomUUID();
         service.reserve(orderId, List.of(item(ordered.get(0), 2), item(ordered.get(1), 2)));
+        UUID reservationId = reservations.findByOrderId(orderId).orElseThrow().getId();
         Product inconsistent = products.findById(ordered.get(1).getId()).orElseThrow();
         inconsistent.setQuantityReserved(0);
         products.saveAndFlush(inconsistent);
 
-        assertThatThrownBy(() -> service.confirm(orderId)).isInstanceOf(StockInconsistencyException.class);
+        assertThatThrownBy(() -> service.confirm(orderId, reservationId)).isInstanceOf(StockInconsistencyException.class);
 
         assertStock(ordered.getFirst(), 5, 2);
         assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
@@ -391,9 +388,9 @@ class StockServiceTests {
 
     @Test
     void unknownOrderCannotReleaseOrConfirmAggregatedStock() {
-        assertThatThrownBy(() -> service.release(UUID.randomUUID()))
+        assertThatThrownBy(() -> service.release(UUID.randomUUID(), UUID.randomUUID()))
                 .isInstanceOf(StockReservationNotFoundException.class);
-        assertThatThrownBy(() -> service.confirm(UUID.randomUUID()))
+        assertThatThrownBy(() -> service.confirm(UUID.randomUUID(), UUID.randomUUID()))
                 .isInstanceOf(StockReservationNotFoundException.class);
     }
 
@@ -456,7 +453,7 @@ class StockServiceTests {
         UUID orderId = UUID.randomUUID();
         service.reserve(orderId, List.of(item(product, 2)));
         PaymentApprovedEvent event = approval(orderId);
-        service.release(orderId);
+        service.release(orderId, event.getReservationId());
 
         assertThatThrownBy(() -> paymentApprovedListener.hearPaymentApproved(event))
                 .isInstanceOf(StockInconsistencyException.class);

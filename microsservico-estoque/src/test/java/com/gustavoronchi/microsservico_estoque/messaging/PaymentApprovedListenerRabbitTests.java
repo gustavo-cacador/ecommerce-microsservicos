@@ -20,6 +20,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 
@@ -77,6 +78,41 @@ class PaymentApprovedListenerRabbitTests {
     }
 
     @Test
+    void legacyCommandsRemainQueuedAndOnlyPaymentApprovalConfirmsReservation() throws Exception {
+        Product product = product();
+        UUID orderId = reserve(product);
+        UUID reservationId = reservations.findByOrderId(orderId).orElseThrow().getId();
+        String payload = """
+                {"orderId":"%s","items":[{"productId":"%s","quantity":100}]}
+                """.formatted(orderId, product.getId());
+
+        for (String exchange : List.of("stock.confirm", "stock.release")) {
+            String queue = exchange + ".queue";
+            Integer consumers = rabbit.execute(channel -> {
+                channel.exchangeDeclare(exchange, "fanout", true);
+                channel.queueDeclare(queue, true, false, false,
+                        Map.of("x-dead-letter-exchange", exchange + ".dlx"));
+                channel.queueBind(queue, exchange, "");
+                channel.queuePurge(queue);
+                return channel.queueDeclarePassive(queue).getConsumerCount();
+            });
+            assertThat(consumers).isZero();
+            MessageProperties properties = new MessageProperties();
+            properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+            rabbit.send(exchange, "", new Message(payload.getBytes(StandardCharsets.UTF_8), properties));
+            await(() -> messages(queue) == 1);
+        }
+
+        assertStock(product, 5, 2);
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.RESERVED);
+
+        publish(approval(orderId, reservationId));
+        await(() -> reservations.findByOrderId(orderId).orElseThrow().getStatus() == ReservationStatus.CONFIRMED);
+        assertStock(product, 3, 0);
+    }
+
+    @Test
     void invalidReservationUnknownOrderAndReleasedReservationGoToDeadLetter() throws Exception {
         Product product = product();
         UUID orderId = reserve(product);
@@ -89,7 +125,7 @@ class PaymentApprovedListenerRabbitTests {
         assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.RESERVED);
 
-        service.release(orderId);
+        service.release(orderId, reservationId);
         publish(approval(orderId, reservationId));
         await(() -> messages(RabbitMQConfig.STOCK_PAYMENT_APPROVED_DLQ) == 4);
         assertStock(product, 5, 0);
