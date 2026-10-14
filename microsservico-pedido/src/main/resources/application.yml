@@ -32,5 +32,3 @@ server:
 clients:
   estoque-service:
     url: http://localhost:8081
-  pagamento-service:
-    url: http://localhost:8083

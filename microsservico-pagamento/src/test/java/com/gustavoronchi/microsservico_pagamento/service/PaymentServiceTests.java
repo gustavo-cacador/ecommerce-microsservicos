@@ -11,7 +11,6 @@ import com.gustavoronchi.microsservico_pagamento.messaging.PaymentListener;
 import com.gustavoronchi.microsservico_pagamento.messaging.StockReservedEvent;
 import com.gustavoronchi.microsservico_pagamento.messaging.PaymentApprovedEvent;
 import com.gustavoronchi.microsservico_pagamento.messaging.PaymentRefusedEvent;
-import com.gustavoronchi.microsservico_pagamento.resource.PaymentResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -23,10 +22,8 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -43,9 +40,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DataJpaTest(showSql = false)
 @Import({PaymentService.class, PaymentListener.class, PaymentServiceTests.JsonConfig.class})
@@ -253,16 +247,13 @@ class PaymentServiceTests {
     }
 
     @Test
-    void existingHttpEndpointUsesSameShortTransactionsAndSinglePayment() throws Exception {
-        var mvc = MockMvcBuilders.standaloneSetup(new PaymentResource(service)).build();
-        String body = "{\"orderId\":\"" + event.getOrderId() + "\",\"amount\":499.80}";
-        mvc.perform(post("/payments").contentType(MediaType.APPLICATION_JSON).content(body))
-                .andExpect(status().isOk()).andExpect(jsonPath("status").value("APPROVED"));
-        mvc.perform(post("/payments").contentType(MediaType.APPLICATION_JSON).content(body))
-                .andExpect(status().isOk()).andExpect(jsonPath("status").value("APPROVED"));
-        assertThat(payments.count()).isEqualTo(1);
+    void paymentWithoutReservationIsRejectedBeforeCallingGateway() {
+        event.setReservationId(null);
+
+        assertThatThrownBy(() -> service.process(event)).isInstanceOf(InvalidPaymentRequestException.class);
+        assertThat(payments.count()).isZero();
         assertThat(events.count()).isZero();
-        verify(gateway, times(1)).process(event.getOrderId(), event.getAmount(), "BRL");
+        verifyNoInteractions(gateway);
     }
 
     private void assertPendingOutsideTransaction() {
