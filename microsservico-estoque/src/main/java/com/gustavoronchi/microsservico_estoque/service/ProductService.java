@@ -3,12 +3,12 @@ package com.gustavoronchi.microsservico_estoque.service;
 import com.gustavoronchi.microsservico_estoque.exception.DatabaseException;
 import com.gustavoronchi.microsservico_estoque.exception.InvalidProductRequestException;
 import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
+import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyException;
 import com.gustavoronchi.microsservico_estoque.domain.entities.Product;
 import com.gustavoronchi.microsservico_estoque.domain.repository.ProductRepository;
 import com.gustavoronchi.microsservico_estoque.dto.ProductRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductResponseDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductPriceDTO;
-import jakarta.persistence.EntityNotFoundException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -87,19 +87,23 @@ public class ProductService {
 
     @Transactional
     public ProductResponseDTO update(UUID id, ProductRequestDTO dto) {
-        try {
-            Product product = productRepository.getReferenceById(id);
-            product.setName(dto.getName());
-            product.setDescription(dto.getDescription());
-            product.setPrice(dto.getPrice());
-            product.setImgUrl(dto.getImgUrl());
-            product.setQuantityAvailable(dto.getQuantityAvailable());
-            product.setCategoryId(dto.getCategoryId());
-            Product updatedProduct = productRepository.save(product);
-            return new ProductResponseDTO(updatedProduct);
-        } catch (EntityNotFoundException e) {
-            throw new ProductNotFoundException("Produto com id: " + id + " não encontrado.");
+        if (dto == null || dto.getQuantityAvailable() == null || dto.getQuantityAvailable() < 0) {
+            throw new InvalidProductRequestException("Informe uma quantidade de estoque maior ou igual a zero.");
         }
+        Product product = productRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new ProductNotFoundException("Produto com id: " + id + " não encontrado."));
+        if (dto.getQuantityAvailable() < product.getQuantityReserved()) {
+            throw new StockInconsistencyException("Quantidade de estoque não pode ser menor que a quantidade reservada: "
+                    + product.getQuantityReserved());
+        }
+        product.setName(dto.getName());
+        product.setDescription(dto.getDescription());
+        product.setPrice(dto.getPrice());
+        product.setImgUrl(dto.getImgUrl());
+        product.setQuantityAvailable(dto.getQuantityAvailable());
+        product.setCategoryId(dto.getCategoryId());
+        Product updatedProduct = productRepository.save(product);
+        return new ProductResponseDTO(updatedProduct);
     }
 
     @Transactional(propagation = Propagation.SUPPORTS)
