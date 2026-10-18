@@ -25,6 +25,12 @@ spring:
     listener:
       simple:
         default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-retries: 2 # uma tentativa inicial e duas novas tentativas
+          initial-interval: 1s
+          multiplier: 2
+          max-interval: 2s
 
 management:
   endpoints:
@@ -34,3 +40,7 @@ management:
 
 server:
   port: 8083
+
+payment:
+  gateway:
+    simulate-timeout: false

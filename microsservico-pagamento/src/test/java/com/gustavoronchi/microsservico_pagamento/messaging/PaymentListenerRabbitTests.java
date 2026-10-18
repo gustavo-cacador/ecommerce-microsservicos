@@ -14,9 +14,12 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -43,6 +46,8 @@ class PaymentListenerRabbitTests {
     private JsonMapper jsonMapper;
     @MockitoBean
     private PaymentGateway gateway;
+    @MockitoSpyBean
+    private PaymentListener listener;
 
     @Test
     void consumesRawJsonHandlesDuplicatesAndRecoversPendingFromDeadLetter() throws Exception {
@@ -57,6 +62,7 @@ class PaymentListenerRabbitTests {
         assertThat(payments.findAll()).hasSize(1);
         assertThat(payments.findAll().getFirst().getStatus()).isEqualTo(PaymentStatus.PENDING);
         assertThat(events.count()).isZero();
+        verify(gateway, times(3)).process(orderId, payments.findAll().getFirst().getAmount(), "BRL");
         UUID paymentId = payments.findAll().getFirst().getId();
 
         doReturn(PaymentStatus.APPROVED).when(gateway).process(any(), any(), any());
@@ -71,7 +77,8 @@ class PaymentListenerRabbitTests {
         publish("{}");
         await(() -> deadLetters() == 2);
         assertThat(payments.findAll().getFirst().getStatus()).isEqualTo(PaymentStatus.APPROVED);
-        verify(gateway, times(2)).process(orderId, payments.findAll().getFirst().getAmount(), "BRL");
+        verify(listener, times(1)).hearStockReserved(argThat(event -> event != null && event.getEventId() == null));
+        verify(gateway, times(4)).process(orderId, payments.findAll().getFirst().getAmount(), "BRL");
 
         await(() -> events.count() == 1 && events.findAll().getFirst().getPublishedAt() != null);
         Message orderCopy = rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_APPROVED_QUEUE, 5000);
@@ -130,6 +137,39 @@ class PaymentListenerRabbitTests {
         rejectResult(RabbitMQConfig.STOCK_PAYMENT_REFUSED_QUEUE);
         assertThat(rabbit.receive(RabbitMQConfig.ORDER_PAYMENT_REFUSED_DLQ, 5000)).isNotNull();
         assertThat(rabbit.receive(RabbitMQConfig.STOCK_PAYMENT_REFUSED_DLQ, 5000)).isNotNull();
+
+        UUID recoveredOrderId = UUID.randomUUID();
+        String recoveredPayload = """
+                {"eventId":"%s","orderId":"%s","occurredAt":"2026-10-18T12:00:00Z",
+                 "reservationId":"%s","amount":100.00,"currency":"BRL"}
+                """.formatted(UUID.randomUUID(), recoveredOrderId, UUID.randomUUID());
+        var attempts = new CopyOnWriteArrayList<Long>();
+        doAnswer(invocation -> {
+            attempts.add(System.nanoTime());
+            if (attempts.size() < 3) {
+                throw new PaymentGatewayUnavailableException("Indisponibilidade temporária");
+            }
+            return PaymentStatus.APPROVED;
+        }).when(gateway).process(eq(recoveredOrderId), any(), eq("BRL"));
+
+        publish(recoveredPayload);
+        await(() -> payments.findAll().stream().anyMatch(payment -> payment.getOrderId().equals(recoveredOrderId)
+                && payment.getStatus() == PaymentStatus.APPROVED));
+        assertThat(attempts).hasSize(3);
+        assertThat(TimeUnit.NANOSECONDS.toMillis(attempts.get(1) - attempts.get(0))).isGreaterThanOrEqualTo(1000);
+        assertThat(TimeUnit.NANOSECONDS.toMillis(attempts.get(2) - attempts.get(1))).isGreaterThanOrEqualTo(2000);
+        assertThat(payments.count()).isEqualTo(3);
+        assertThat(events.findAll().stream().filter(event -> event.getOrderId().equals(recoveredOrderId)).count())
+                .isEqualTo(1);
+        assertThat(deadLetters()).isEqualTo(2);
+
+        publish(recoveredPayload);
+        // A mensagem inválida serve também de marcador após a duplicata, no mesmo consumidor.
+        publish("{}");
+        await(() -> deadLetters() == 3);
+        verify(gateway, times(3)).process(eq(recoveredOrderId), any(), eq("BRL"));
+        assertThat(payments.count()).isEqualTo(3);
+        assertThat(events.count()).isEqualTo(3);
     }
 
     private void rejectResult(String queue) throws InterruptedException {

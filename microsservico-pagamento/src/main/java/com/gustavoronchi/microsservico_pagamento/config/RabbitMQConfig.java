@@ -1,11 +1,15 @@
 package com.gustavoronchi.microsservico_pagamento.config;
 
+import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGatewayUnavailableException;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.boot.amqp.autoconfigure.RabbitListenerRetrySettingsCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
+
+import java.util.List;
 
 @Configuration
 @EnableScheduling
@@ -173,6 +177,11 @@ public class RabbitMQConfig {
     @Bean
     public Binding bindStockPaymentRefusedDlq() {
         return BindingBuilder.bind(stockPaymentRefusedDlq()).to(stockPaymentRefusedDlx());
+    }
+
+    @Bean
+    public RabbitListenerRetrySettingsCustomizer paymentRetrySettingsCustomizer() {
+        return settings -> settings.setExceptionIncludes(List.of(PaymentGatewayUnavailableException.class));
     }
 
     @Bean
