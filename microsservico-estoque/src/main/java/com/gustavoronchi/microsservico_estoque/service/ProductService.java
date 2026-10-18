@@ -1,6 +1,5 @@
 package com.gustavoronchi.microsservico_estoque.service;
 
-import com.gustavoronchi.microsservico_estoque.exception.DatabaseException;
 import com.gustavoronchi.microsservico_estoque.exception.InvalidProductRequestException;
 import com.gustavoronchi.microsservico_estoque.exception.ProductNotFoundException;
 import com.gustavoronchi.microsservico_estoque.exception.StockInconsistencyException;
@@ -9,11 +8,9 @@ import com.gustavoronchi.microsservico_estoque.domain.repository.ProductReposito
 import com.gustavoronchi.microsservico_estoque.dto.ProductRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductResponseDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductPriceDTO;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -106,14 +103,14 @@ public class ProductService {
         return new ProductResponseDTO(updatedProduct);
     }
 
-    @Transactional(propagation = Propagation.SUPPORTS)
+    @Transactional
     public void delete(UUID id) {
-        if (!productRepository.existsById(id)) {
-            throw new ProductNotFoundException("Produto com id: " + id + " não encontrado.");
-        } try {
-            productRepository.deleteById(id);
-        } catch (DataIntegrityViolationException e) {
-            throw new DatabaseException("Falha de integridade referencial.");
+        Product product = productRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new ProductNotFoundException("Produto com id: " + id + " não encontrado."));
+        if (product.getQuantityReserved() > 0) {
+            throw new StockInconsistencyException("Não é possível desativar um produto com reservas pendentes de pedidos.");
         }
+        product.setActive(false);
+        productRepository.save(product);
     }
 }

@@ -11,6 +11,7 @@ import com.gustavoronchi.microsservico_estoque.resource.ProductResource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +19,7 @@ import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -37,6 +39,9 @@ import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -174,6 +179,163 @@ class ProductServiceTests {
         assertStock(product, 5, 4);
         assertThat(reservations.findByOrderId(firstOrder).orElseThrow().getStatus()).isEqualTo(ReservationStatus.RESERVED);
         assertThat(reservations.findByOrderId(secondOrder).orElseThrow().getStatus()).isEqualTo(ReservationStatus.RESERVED);
+    }
+
+    @Test
+    void deleteHidesProductAndRejectsNewReservationsWithoutRemovingItsData() throws Exception {
+        Product product = product();
+        Product before = products.findById(product.getId()).orElseThrow();
+
+        mvc.perform(delete("/products/{id}", product.getId())).andExpect(status().isNoContent());
+
+        Product persisted = products.findById(product.getId()).orElseThrow();
+        assertThat(persisted.getActive()).isFalse();
+        assertThat(persisted).usingRecursiveComparison().ignoringFields("active").isEqualTo(before);
+        mvc.perform(get("/products/{id}", product.getId())).andExpect(status().isNotFound());
+        assertThat(service.findAll(product.getCategoryId(), PageRequest.of(0, 10)).getContent()).isEmpty();
+        mvc.perform(post("/products/prices").contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonMapper.writeValueAsString(List.of(product.getId()))))
+                .andExpect(status().isNotFound());
+
+        UUID orderId = UUID.randomUUID();
+        assertThat(stockService.reserve(orderId, List.of(new StockItemRequestDTO(product.getId(), 2)))
+                .isSuccess()).isFalse();
+        assertThat(reservations.findByOrderId(orderId)).isEmpty();
+        assertStock(product, 5, 0);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ReservationStatus.class, names = {"CONFIRMED", "RELEASED"})
+    void deleteIsBlockedUntilReservationIsConfirmedOrReleased(ReservationStatus targetStatus) throws Exception {
+        Product product = product();
+        UUID orderId = reserve(product);
+        UUID reservationId = reservations.findByOrderId(orderId).orElseThrow().getId();
+        Product before = products.findById(product.getId()).orElseThrow();
+
+        mvc.perform(delete("/products/{id}", product.getId())).andExpect(status().isConflict());
+        assertThat(products.findById(product.getId()).orElseThrow()).usingRecursiveComparison().isEqualTo(before);
+        mvc.perform(get("/products/{id}", product.getId())).andExpect(status().isOk());
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus()).isEqualTo(ReservationStatus.RESERVED);
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (targetStatus == ReservationStatus.CONFIRMED) {
+                stockService.confirm(orderId, reservationId);
+            } else {
+                stockService.release(orderId, reservationId);
+            }
+        }
+
+        assertStock(product, targetStatus == ReservationStatus.CONFIRMED ? 3 : 5, 0);
+        mvc.perform(delete("/products/{id}", product.getId())).andExpect(status().isNoContent());
+        mvc.perform(delete("/products/{id}", product.getId())).andExpect(status().isNoContent());
+        assertThat(products.findById(product.getId()).orElseThrow().getActive()).isFalse();
+        assertThat(reservations.findByOrderId(orderId).orElseThrow().getStatus()).isEqualTo(targetStatus);
+    }
+
+    @Test
+    void deleteUnknownProductReturnsNotFound() throws Exception {
+        mvc.perform(delete("/products/{id}", UUID.randomUUID())).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void deleteRemainsBlockedWhileAnotherOrderStillHasReservedUnits() throws Exception {
+        Product product = product();
+        UUID firstOrder = reserve(product);
+        UUID secondOrder = reserve(product);
+        stockService.confirm(firstOrder, reservations.findByOrderId(firstOrder).orElseThrow().getId());
+
+        mvc.perform(delete("/products/{id}", product.getId())).andExpect(status().isConflict());
+        assertStock(product, 3, 2);
+        assertThat(products.findById(product.getId()).orElseThrow().getActive()).isTrue();
+
+        stockService.release(secondOrder, reservations.findByOrderId(secondOrder).orElseThrow().getId());
+        mvc.perform(delete("/products/{id}", product.getId())).andExpect(status().isNoContent());
+        assertStock(product, 3, 0);
+    }
+
+    @Test
+    void deleteWaitsForConcurrentReservationAndRejectsCommittedReservedUnits() throws Exception {
+        Product product = product();
+        UUID orderId = UUID.randomUUID();
+        CountDownLatch reserved = new CountDownLatch(1);
+        CountDownLatch commitReservation = new CountDownLatch(1);
+        CountDownLatch deleteStarted = new CountDownLatch(1);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            try {
+                var reservation = executor.submit(() -> transactionTemplate.executeWithoutResult(transaction -> {
+                    assertThat(stockService.reserve(orderId,
+                            List.of(new StockItemRequestDTO(product.getId(), 2))).isSuccess()).isTrue();
+                    reserved.countDown();
+                    try {
+                        assertThat(commitReservation.await(5, TimeUnit.SECONDS)).isTrue();
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(exception);
+                    }
+                }));
+                assertThat(reserved.await(5, TimeUnit.SECONDS)).isTrue();
+                var deletion = executor.submit(() -> {
+                    deleteStarted.countDown();
+                    service.delete(product.getId());
+                });
+                assertThat(deleteStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThatThrownBy(() -> deletion.get(200, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+
+                commitReservation.countDown();
+                reservation.get(5, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> deletion.get(5, TimeUnit.SECONDS))
+                        .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(StockInconsistencyException.class);
+            } finally {
+                commitReservation.countDown();
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(products.findById(product.getId()).orElseThrow().getActive()).isTrue();
+        assertStock(product, 5, 2);
+    }
+
+    @Test
+    void reservationWaitsForDeactivationAndRejectsInactiveProduct() throws Exception {
+        Product product = product();
+        UUID orderId = UUID.randomUUID();
+        CountDownLatch deactivated = new CountDownLatch(1);
+        CountDownLatch commitDeactivation = new CountDownLatch(1);
+        CountDownLatch reservationStarted = new CountDownLatch(1);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            try {
+                var deletion = executor.submit(() -> transactionTemplate.executeWithoutResult(transaction -> {
+                    service.delete(product.getId());
+                    deactivated.countDown();
+                    try {
+                        assertThat(commitDeactivation.await(5, TimeUnit.SECONDS)).isTrue();
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(exception);
+                    }
+                }));
+                assertThat(deactivated.await(5, TimeUnit.SECONDS)).isTrue();
+                var reservation = executor.submit(() -> {
+                    reservationStarted.countDown();
+                    return stockService.reserve(orderId, List.of(new StockItemRequestDTO(product.getId(), 2)));
+                });
+                assertThat(reservationStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThatThrownBy(() -> reservation.get(200, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+
+                commitDeactivation.countDown();
+                deletion.get(5, TimeUnit.SECONDS);
+                assertThat(reservation.get(5, TimeUnit.SECONDS).isSuccess()).isFalse();
+            } finally {
+                commitDeactivation.countDown();
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(products.findById(product.getId()).orElseThrow().getActive()).isFalse();
+        assertThat(reservations.findByOrderId(orderId)).isEmpty();
+        assertStock(product, 5, 0);
     }
 
     private Product product() {
