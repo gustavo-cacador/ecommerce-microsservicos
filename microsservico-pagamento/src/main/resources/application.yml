@@ -44,3 +44,4 @@ server:
 payment:
   gateway:
     simulate-timeout: false
+    failures-before-response: 0
