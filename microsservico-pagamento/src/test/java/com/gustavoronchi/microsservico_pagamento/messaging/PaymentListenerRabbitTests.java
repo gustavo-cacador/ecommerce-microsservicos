@@ -9,6 +9,7 @@ import com.gustavoronchi.microsservico_pagamento.gateway.PaymentGatewayUnavailab
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,6 +52,11 @@ class PaymentListenerRabbitTests {
 
     @Test
     void consumesRawJsonHandlesDuplicatesAndRecoversPendingFromDeadLetter() throws Exception {
+        String otherSubscriberQueue = rabbit.execute(channel -> {
+            String queue = channel.queueDeclare("", false, true, false, null).getQueue();
+            channel.queueBind(queue, RabbitMQConfig.STOCK_RESERVED_EXCHANGE, "");
+            return queue;
+        });
         UUID orderId = UUID.randomUUID();
         String payload = """
                 {"eventId":"%s","orderId":"%s","occurredAt":"2026-10-01T12:00:00Z",
@@ -64,18 +70,34 @@ class PaymentListenerRabbitTests {
         assertThat(events.count()).isZero();
         verify(gateway, times(3)).process(orderId, payments.findAll().getFirst().getAmount(), "BRL");
         UUID paymentId = payments.findAll().getFirst().getId();
+        assertThat(rabbit.receive(otherSubscriberQueue, 5000)).isNotNull();
+
+        Message recovery = peekDeadLetter();
+        StockReservedEvent original = jsonMapper.readValue(recovery.getBody(), StockReservedEvent.class);
+        assertThat(original.getOrderId()).isEqualTo(orderId);
+        assertThat(new String(recovery.getBody(), StandardCharsets.UTF_8)).isEqualTo(payload);
+        assertThat(recovery.getMessageProperties().getMessageId()).isEqualTo(original.getEventId().toString());
+        assertThat(deadLetters()).isEqualTo(1);
 
         doReturn(PaymentStatus.APPROVED).when(gateway).process(any(), any(), any());
-        publish(payload);
+        rabbit.send("", RabbitMQConfig.PAYMENT_STOCK_RESERVED_QUEUE, recovery);
         await(() -> payments.findAll().getFirst().getStatus() == PaymentStatus.APPROVED);
-        publish(payload);
-        publish(payload);
+        assertThat(rabbit.receive(otherSubscriberQueue)).isNull();
+        assertThat(deadLetters()).isEqualTo(1);
+
+        // A cópia original só é removida depois de confirmar o resultado persistido.
+        Message removed = rabbit.receive(RabbitMQConfig.PAYMENT_STOCK_RESERVED_DLQ, 5000);
+        assertThat(removed).isNotNull();
+        assertThat(removed.getBody()).isEqualTo(recovery.getBody());
+        assertThat(deadLetters()).isZero();
+        rabbit.send("", RabbitMQConfig.PAYMENT_STOCK_RESERVED_QUEUE, recovery);
+        rabbit.send("", RabbitMQConfig.PAYMENT_STOCK_RESERVED_QUEUE, recovery);
         await(() -> Boolean.TRUE.equals(rabbit.execute(channel -> channel.messageCount(
                         RabbitMQConfig.PAYMENT_STOCK_RESERVED_QUEUE) == 0)));
         assertThat(payments.findAll()).hasSize(1);
         assertThat(payments.findAll().getFirst().getId()).isEqualTo(paymentId);
         publish("{}");
-        await(() -> deadLetters() == 2);
+        await(() -> deadLetters() == 1);
         assertThat(payments.findAll().getFirst().getStatus()).isEqualTo(PaymentStatus.APPROVED);
         verify(listener, times(1)).hearStockReserved(argThat(event -> event != null && event.getEventId() == null));
         verify(gateway, times(4)).process(orderId, payments.findAll().getFirst().getAmount(), "BRL");
@@ -161,12 +183,12 @@ class PaymentListenerRabbitTests {
         assertThat(payments.count()).isEqualTo(3);
         assertThat(events.findAll().stream().filter(event -> event.getOrderId().equals(recoveredOrderId)).count())
                 .isEqualTo(1);
-        assertThat(deadLetters()).isEqualTo(2);
+        assertThat(deadLetters()).isEqualTo(1);
 
         publish(recoveredPayload);
         // A mensagem inválida serve também de marcador após a duplicata, no mesmo consumidor.
         publish("{}");
-        await(() -> deadLetters() == 3);
+        await(() -> deadLetters() == 2);
         verify(gateway, times(3)).process(eq(recoveredOrderId), any(), eq("BRL"));
         assertThat(payments.count()).isEqualTo(3);
         assertThat(events.count()).isEqualTo(3);
@@ -185,8 +207,27 @@ class PaymentListenerRabbitTests {
     private void publish(String payload) {
         MessageProperties properties = new MessageProperties();
         properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+        StockReservedEvent event = jsonMapper.readValue(payload, StockReservedEvent.class);
+        if (event.getEventId() != null) {
+            properties.setMessageId(event.getEventId().toString());
+        }
         rabbit.send(RabbitMQConfig.STOCK_RESERVED_EXCHANGE, "",
                 new Message(payload.getBytes(StandardCharsets.UTF_8), properties));
+    }
+
+    private Message peekDeadLetter() {
+        return rabbit.execute(channel -> {
+            var original = channel.basicGet(RabbitMQConfig.PAYMENT_STOCK_RESERVED_DLQ, false);
+            assertThat(original).isNotNull();
+            channel.basicNack(original.getEnvelope().getDeliveryTag(), false, true);
+            // Como no painel: preservar o payload e o message_id, sem copiar os headers de dead-letter.
+            MessageProperties properties = new MessageProperties();
+            properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+            properties.setContentEncoding(StandardCharsets.UTF_8.name());
+            properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+            properties.setMessageId(original.getProps().getMessageId());
+            return new Message(original.getBody(), properties);
+        });
     }
 
     private long deadLetters() {
