@@ -60,6 +60,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -150,15 +151,151 @@ class OrderServiceTests {
     }
 
     @Test
-    void outboxFailureRollsBackOrderAndItems() {
+    void repeatedKeyReturnsSavedOrderWithoutQueryingCatalogAgain() throws Exception {
+        OrderRequestDTO request = request(2);
+        String key = "k".repeat(128);
+        var first = mvc.perform(post("/orders").header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(request)))
+                .andExpect(status().isCreated()).andReturn().getResponse();
+        UUID orderId = UUID.fromString(jsonMapper.readTree(first.getContentAsString()).get("orderId").asString());
+        UUID eventId = events.findAll().getFirst().getEventId();
+        orderService.approvePayment(orderId, new BigDecimal("20.00"));
+        firstPrice.setPrice(new BigDecimal("999.00"));
+        firstPrice.setAvailableStock(0);
+        when(stockClient.findPrices(any())).thenThrow(new ResourceAccessException("Catálogo indisponível"));
+
+        var repeated = mvc.perform(post("/orders").header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(request)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.orderId").value(orderId.toString()))
+                .andExpect(jsonPath("$.status").value("PAID"))
+                .andExpect(jsonPath("$.totalValue").value(20.00))
+                .andReturn().getResponse();
+
+        assertThat(repeated.getHeader("Location")).isEqualTo(first.getHeader("Location"));
+        verify(stockClient).findPrices(List.of(firstProductId));
+        assertThat(orders.count()).isEqualTo(1);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(event -> assertThat(event.getEventId()).isEqualTo(eventId));
+    }
+
+    @Test
+    void repeatedKeyAcceptsReorderedAndConsolidatedItems() {
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, 1), new OrderItemRequestDTO(secondProductId, 1),
+                new OrderItemRequestDTO(firstProductId, 2)));
+        var first = orderService.createOrder(request, "checkout-1");
+        OrderRequestDTO repeated = new OrderRequestDTO(request.getClientId(), List.of(
+                new OrderItemRequestDTO(secondProductId, 1), new OrderItemRequestDTO(firstProductId, 3)));
+
+        assertThat(orderService.createOrder(repeated, "checkout-1").getOrderId()).isEqualTo(first.getOrderId());
+        assertThat(orders.count()).isEqualTo(1);
+        assertThat(events.count()).isEqualTo(1);
+        verify(stockClient).findPrices(List.of(firstProductId, secondProductId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"client", "product", "quantity"})
+    void reusedKeyWithDifferentRequestReturns409(String changedField) throws Exception {
+        OrderRequestDTO request = request(1);
+        var first = orderService.createOrder(request, "checkout-1");
+        OrderRequestDTO changed = new OrderRequestDTO(
+                changedField.equals("client") ? UUID.randomUUID() : request.getClientId(),
+                List.of(new OrderItemRequestDTO(changedField.equals("product") ? secondProductId : firstProductId,
+                        changedField.equals("quantity") ? 2 : 1)));
+
+        mvc.perform(post("/orders").header("Idempotency-Key", "checkout-1")
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(changed)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Idempotency-Key já utilizada para um pedido com dados diferentes."));
+
+        assertThat(orders.findAll()).singleElement()
+                .satisfies(order -> assertThat(order.getId()).isEqualTo(first.getOrderId()));
+        assertThat(events.count()).isEqualTo(1);
+        verify(stockClient).findPrices(List.of(firstProductId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 3, 129})
+    void invalidKeyReturns400WithoutQueryingCatalog(int length) throws Exception {
+        String key = length == 3 ? "   " : "k".repeat(length);
+        mvc.perform(post("/orders").header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(request(1))))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(stockClient);
+        assertThat(orders.count()).isZero();
+        assertThat(events.count()).isZero();
+    }
+
+    @Test
+    void differentKeysAndMissingKeysAllowIndependentOrders() {
+        OrderRequestDTO request = request(1);
+        var first = orderService.createOrder(request, "checkout-1");
+        var second = orderService.createOrder(request, "checkout-2");
+        var third = orderService.createOrder(request);
+        var fourth = orderService.createOrder(request);
+
+        assertThat(List.of(first.getOrderId(), second.getOrderId(), third.getOrderId(), fourth.getOrderId()))
+                .doesNotHaveDuplicates();
+        assertThat(orders.count()).isEqualTo(4);
+        assertThat(events.count()).isEqualTo(4);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void concurrentRequestsWithSameKeyCreateOnlyOneOrderAndEvent(boolean differentQuantity) throws Exception {
+        OrderRequestDTO first = request(1);
+        OrderRequestDTO second = new OrderRequestDTO(first.getClientId(),
+                List.of(new OrderItemRequestDTO(firstProductId, differentQuantity ? 2 : 1)));
+        CountDownLatch catalogCalls = new CountDownLatch(2);
+        when(stockClient.findPrices(any())).thenAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            catalogCalls.countDown();
+            assertThat(catalogCalls.await(5, TimeUnit.SECONDS)).isTrue();
+            return List.of(firstPrice);
+        });
+
+        var responses = concurrently(
+                () -> mvc.perform(post("/orders").header("Idempotency-Key", "concurrent-checkout")
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(first)))
+                        .andReturn().getResponse(),
+                () -> mvc.perform(post("/orders").header("Idempotency-Key", "concurrent-checkout")
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(second)))
+                        .andReturn().getResponse());
+
+        assertThat(responses.stream().map(response -> response.getStatus()).toList())
+                .containsExactlyInAnyOrder(201, differentQuantity ? 409 : 201);
+        var saved = orders.findByIdempotencyKey("concurrent-checkout").orElseThrow();
+        for (var response : responses) {
+            if (response.getStatus() == 201) {
+                assertThat(jsonMapper.readTree(response.getContentAsString()).get("orderId").asString())
+                        .isEqualTo(saved.getId().toString());
+            }
+        }
+        assertThat(orders.count()).isEqualTo(1);
+        assertThat(events.findAll()).singleElement()
+                .satisfies(event -> assertThat(event.getOrderId()).isEqualTo(saved.getId()));
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "checkout-rollback")
+    void outboxFailureRollsBackOrderAndItems(String key) {
         doThrow(new DataIntegrityViolationException("Falha simulada na outbox"))
                 .when(events).save(any(OutboxEvent.class));
 
-        assertThatThrownBy(() -> orderService.createOrder(request(1)))
+        OrderRequestDTO request = request(1);
+        assertThatThrownBy(() -> orderService.createOrder(request, key))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         assertThat(orders.findAll()).isEmpty();
         assertThat(events.findAll()).isEmpty();
+
+        reset(events);
+        orderService.createOrder(request, key);
+        assertThat(orders.count()).isEqualTo(1);
+        assertThat(events.count()).isEqualTo(1);
     }
 
     @Test

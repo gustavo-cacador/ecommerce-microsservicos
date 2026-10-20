@@ -10,10 +10,12 @@ import com.gustavoronchi.microsservico_pedido.domain.repository.OutboxEventRepos
 import com.gustavoronchi.microsservico_pedido.dto.*;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import com.gustavoronchi.microsservico_pedido.exception.InvalidOrderRequestException;
+import com.gustavoronchi.microsservico_pedido.exception.IdempotencyConflictException;
 import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockException;
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
 import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -112,6 +114,13 @@ public class OrderService {
     }
 
     public OrderResponseDTO createOrder(OrderRequestDTO request) {
+        return createOrder(request, null);
+    }
+
+    public OrderResponseDTO createOrder(OrderRequestDTO request, String idempotencyKey) {
+        if (idempotencyKey != null && (idempotencyKey.isBlank() || idempotencyKey.length() > 128)) {
+            throw new InvalidOrderRequestException("Idempotency-Key deve conter de 1 a 128 caracteres e não pode ser em branco.");
+        }
         if (request == null || request.getClientId() == null || request.getItems() == null || request.getItems().isEmpty()
                 || request.getItems().stream().anyMatch(item -> item == null || item.getProductId() == null
                         || item.getQuantity() == null || item.getQuantity() <= 0)) {
@@ -125,6 +134,11 @@ public class OrderService {
             } catch (ArithmeticException ex) {
                 throw new InvalidOrderRequestException("Quantidade total excede o limite para o produto " + item.getProductId());
             }
+        }
+
+        OrderResponseDTO existing = findIdempotentOrder(idempotencyKey, request.getClientId(), quantities);
+        if (existing != null) {
+            return existing;
         }
 
         List<ProductPriceDTO> prices;
@@ -154,15 +168,40 @@ public class OrderService {
                 throw new InsufficientStockException(message);
             }
         }
-        return transactionTemplate.execute(status -> create(request, prices));
+        try {
+            return transactionTemplate.execute(status -> create(request, prices, idempotencyKey));
+        } catch (DataIntegrityViolationException ex) {
+            // A requisição concorrente pode ter gravado a mesma chave. Consultar após o rollback.
+            OrderResponseDTO concurrent = findIdempotentOrder(idempotencyKey, request.getClientId(), quantities);
+            if (concurrent != null) {
+                return concurrent;
+            }
+            throw ex;
+        }
     }
 
-    private OrderResponseDTO create(OrderRequestDTO request, List<ProductPriceDTO> prices) {
+    private OrderResponseDTO findIdempotentOrder(String idempotencyKey, UUID clientId, Map<UUID, Integer> quantities) {
+        if (idempotencyKey == null) {
+            return null;
+        }
+        return transactionTemplate.execute(status -> orderRepository.findByIdempotencyKey(idempotencyKey)
+                .map(order -> {
+                    Map<UUID, Integer> savedQuantities = order.getItems().stream()
+                            .collect(Collectors.toMap(OrderItem::getProductId, OrderItem::getQuantity, Math::addExact));
+                    if (!order.getClientId().equals(clientId) || !savedQuantities.equals(quantities)) {
+                        throw new IdempotencyConflictException("Idempotency-Key já utilizada para um pedido com dados diferentes.");
+                    }
+                    return new OrderResponseDTO(order);
+                }).orElse(null));
+    }
+
+    private OrderResponseDTO create(OrderRequestDTO request, List<ProductPriceDTO> prices, String idempotencyKey) {
         Map<UUID, BigDecimal> pricesByProduct = prices.stream()
                 .collect(Collectors.toMap(ProductPriceDTO::getProductId, ProductPriceDTO::getPrice));
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
         Order order = new Order();
         order.setClientId(request.getClientId());
+        order.setIdempotencyKey(idempotencyKey);
         order.setStatus(StatusOrder.CREATED);
         order.setCreatedAt(now);
         order.setUpdatedAt(now);
@@ -182,7 +221,7 @@ public class OrderService {
         order.setTotalValue(order.getItems().stream()
                 .map(item -> item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity())))
                 .reduce(BigDecimal.ZERO, BigDecimal::add));
-        Order saved = orderRepository.save(order);
+        Order saved = orderRepository.saveAndFlush(order);
 
         OutboxEvent event = new OutboxEvent();
         event.setOrderId(saved.getId());

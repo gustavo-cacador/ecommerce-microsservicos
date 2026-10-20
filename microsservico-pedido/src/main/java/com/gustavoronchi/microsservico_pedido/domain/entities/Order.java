@@ -20,6 +20,9 @@ public class Order {
     @Column(nullable = false)
     private UUID clientId;
 
+    @Column(unique = true, length = 128)
+    private String idempotencyKey;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private StatusOrder status;
@@ -61,6 +64,14 @@ public class Order {
 
     public void setClientId(UUID clientId) {
         this.clientId = clientId;
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
     }
 
     public StatusOrder getStatus() {

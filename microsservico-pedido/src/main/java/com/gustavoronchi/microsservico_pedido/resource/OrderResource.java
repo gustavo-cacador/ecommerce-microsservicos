@@ -3,6 +3,7 @@ package com.gustavoronchi.microsservico_pedido.resource;
 import com.gustavoronchi.microsservico_pedido.dto.OrderRequestDTO;
 import com.gustavoronchi.microsservico_pedido.dto.OrderResponseDTO;
 import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockException;
+import com.gustavoronchi.microsservico_pedido.exception.IdempotencyConflictException;
 import com.gustavoronchi.microsservico_pedido.service.OrderService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -25,8 +26,8 @@ public class OrderResource {
         this.orderService = orderService;
     }
 
-    @ExceptionHandler(InsufficientStockException.class)
-    public ResponseEntity<Map<String, String>> handleInsufficientStock(InsufficientStockException exception) {
+    @ExceptionHandler({InsufficientStockException.class, IdempotencyConflictException.class})
+    public ResponseEntity<Map<String, String>> handleConflict(RuntimeException exception) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("message", exception.getMessage()));
     }
 
@@ -41,8 +42,9 @@ public class OrderResource {
     }
 
     @PostMapping
-    public ResponseEntity<OrderResponseDTO> createOrder(@RequestBody OrderRequestDTO orderRequestDTO) {
-        OrderResponseDTO orderResponse = orderService.createOrder(orderRequestDTO);
+    public ResponseEntity<OrderResponseDTO> createOrder(@RequestBody OrderRequestDTO orderRequestDTO,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        OrderResponseDTO orderResponse = orderService.createOrder(orderRequestDTO, idempotencyKey);
 
         URI uri = ServletUriComponentsBuilder
                 .fromCurrentRequest()
