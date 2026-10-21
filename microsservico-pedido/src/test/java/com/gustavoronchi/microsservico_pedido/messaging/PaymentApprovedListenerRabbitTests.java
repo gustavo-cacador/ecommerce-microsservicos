@@ -65,7 +65,7 @@ class PaymentApprovedListenerRabbitTests {
             }
             return null;
         });
-        when(stockClient.findPrices(any())).thenReturn(List.of(new ProductPriceDTO(productId, new BigDecimal("10.00"))));
+        when(stockClient.findPrices(any())).thenReturn(List.of(new ProductPriceDTO(productId, new BigDecimal("10.00"), 50)));
     }
 
     @Test

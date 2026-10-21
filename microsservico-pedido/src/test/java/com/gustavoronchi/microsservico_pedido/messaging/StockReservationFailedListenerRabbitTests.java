@@ -61,7 +61,7 @@ class StockReservationFailedListenerRabbitTests {
             channel.queuePurge(RabbitMQConfig.ORDER_STOCK_RESERVATION_FAILED_DLQ);
             return null;
         });
-        when(stockClient.findPrices(any())).thenReturn(List.of(new ProductPriceDTO(productId, BigDecimal.TEN)));
+        when(stockClient.findPrices(any())).thenReturn(List.of(new ProductPriceDTO(productId, BigDecimal.TEN, 50)));
     }
 
     @Test
