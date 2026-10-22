@@ -7,9 +7,14 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.boot.amqp.autoconfigure.RabbitListenerRetrySettingsCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.transaction.CannotCreateTransactionException;
+
+import java.util.List;
 
 @Configuration
 @EnableScheduling
@@ -164,6 +169,12 @@ public class RabbitMQConfig {
     @Bean
     public Binding bindOrderPaymentRefusedDlq() {
         return BindingBuilder.bind(orderPaymentRefusedDlq()).to(orderPaymentRefusedDlx());
+    }
+
+    @Bean
+    public RabbitListenerRetrySettingsCustomizer orderRetrySettingsCustomizer() {
+        return settings -> settings.setExceptionIncludes(List.of(
+                TransientDataAccessException.class, CannotCreateTransactionException.class));
     }
 
     @Bean
