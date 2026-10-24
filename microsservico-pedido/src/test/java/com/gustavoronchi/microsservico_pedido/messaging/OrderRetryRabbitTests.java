@@ -12,12 +12,14 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import tools.jackson.databind.json.JsonMapper;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
@@ -51,6 +53,8 @@ class OrderRetryRabbitTests {
     private OrderRepository orders;
     @Autowired
     private OutboxEventRepository events;
+    @Autowired
+    private JsonMapper jsonMapper;
     @MockitoBean
     private OutboxRelay outboxRelay;
     @MockitoSpyBean
@@ -201,6 +205,123 @@ class OrderRetryRabbitTests {
         assertBackoffIntervals();
         assertThat(connectionFailures.get()).isEqualTo(2);
         assertUnchanged(order);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"reserved,CREATED", "failed,CREATED", "approved,CREATED", "refused,CREATED",
+            "reserved,PAID", "failed,PAID", "approved,PAID", "refused,PAID",
+            "reserved,CANCELED", "failed,CANCELED", "approved,CANCELED", "refused,CANCELED",
+            "failed,WAITING_PAYMENT"})
+    void manuallyRecoversDeadLetterOnlyToOriginalQueueWithoutRepeatingEffects(
+            String operation, StatusOrder status) throws Exception {
+        Order order = order(status);
+        String payload = payload(order.getId(), "10.00");
+        String eventId = jsonMapper.readTree(payload).get("eventId").asText();
+        Message original = recoveryMessage(payload.getBytes(StandardCharsets.UTF_8), eventId);
+        String exchange = switch (operation) {
+            case "reserved" -> RabbitMQConfig.STOCK_RESERVED_EXCHANGE;
+            case "failed" -> RabbitMQConfig.STOCK_RESERVATION_FAILED_EXCHANGE;
+            case "approved" -> RabbitMQConfig.PAYMENT_APPROVED_EXCHANGE;
+            default -> RabbitMQConfig.PAYMENT_REFUSED_EXCHANGE;
+        };
+        String otherSubscriber = rabbit.execute(channel -> {
+            String name = channel.queueDeclare("", false, true, false, null).getQueue();
+            channel.queueBind(name, exchange, "");
+            return name;
+        });
+
+        try {
+            try (var connection = dataSource.getConnection()) {
+                connection.setAutoCommit(false);
+                try {
+                    try (var statement = connection.prepareStatement("update orders set status = status where id = ?")) {
+                        statement.setObject(1, order.getId());
+                        assertThat(statement.executeUpdate()).isEqualTo(1);
+                    }
+                    rabbit.send(exchange, "", original);
+                    await(() -> deadLetters(operation) == 1);
+                    assertBackoff();
+                    assertUnchanged(order);
+                } finally {
+                    // Corrigir a causa sem reiniciar a aplicação nem recriar o pedido.
+                    connection.rollback();
+                }
+            }
+            Message subscriberCopy = rabbit.receive(otherSubscriber, 5000);
+            assertThat(subscriberCopy).isNotNull();
+            assertThat(subscriberCopy.getBody()).isEqualTo(original.getBody());
+
+            Message recovery = rabbit.execute(channel -> {
+                var deadLetter = channel.basicGet(dlq(operation), false);
+                assertThat(deadLetter).isNotNull();
+                channel.basicNack(deadLetter.getEnvelope().getDeliveryTag(), false, true);
+                assertThat(deadLetter.getProps().getHeaders()).containsKey("x-death");
+                return recoveryMessage(deadLetter.getBody(), deadLetter.getProps().getMessageId());
+            });
+            assertThat(recovery.getBody()).isEqualTo(original.getBody());
+            assertThat(recovery.getMessageProperties().getMessageId()).isEqualTo(eventId);
+            await(() -> deadLetters(operation) == 1);
+
+            rabbit.send("", queue(operation), recovery);
+            rabbit.send("", queue(operation), recovery);
+            // Marcador no mesmo consumidor comprova o término dos dois reenvios.
+            // Outra mensagem que o ACK da cópia recuperada deve preservar.
+            publish(operation, "{}");
+            await(() -> deadLetters(operation) == 2);
+            assertThat(attempts).hasSize(6);
+            Order recovered = saved(order);
+            if (status == StatusOrder.CREATED) {
+                assertThat(recovered.getStatus()).isEqualTo(finalStatus(operation));
+                assertThat(recovered.getUpdatedAt()).isAfter(order.getUpdatedAt());
+            } else {
+                assertUnchanged(order);
+            }
+            assertThat(recovered.getIdempotencyKey()).isEqualTo(order.getIdempotencyKey());
+            assertThat(recovered.getTotalValue()).isEqualByComparingTo(order.getTotalValue());
+            assertThat(orders.count()).isEqualTo(1);
+            assertThat(events.count()).isZero();
+            assertThat(rabbit.receive(otherSubscriber)).isNull();
+
+            // Nova duplicata após capturar o resultado persistido: nem updatedAt pode mudar.
+            rabbit.send("", queue(operation), recovery);
+            publish(operation, "{}");
+            await(() -> deadLetters(operation) == 3);
+            assertThat(attempts).hasSize(8);
+            assertUnchanged(recovered);
+            assertThat(rabbit.receive(otherSubscriber)).isNull();
+
+            // ACK individual somente após resultado persistido e identidade conferida.
+            rabbit.execute(channel -> {
+                var removed = channel.basicGet(dlq(operation), false);
+                assertThat(removed).isNotNull();
+                try {
+                    assertThat(removed.getBody()).isEqualTo(original.getBody());
+                    assertThat(removed.getProps().getMessageId()).isEqualTo(eventId);
+                } catch (AssertionError error) {
+                    channel.basicNack(removed.getEnvelope().getDeliveryTag(), false, true);
+                    throw error;
+                }
+                channel.basicAck(removed.getEnvelope().getDeliveryTag(), false);
+                var remaining = channel.basicGet(dlq(operation), false);
+                assertThat(remaining).isNotNull();
+                channel.basicNack(remaining.getEnvelope().getDeliveryTag(), false, true);
+                assertThat(new String(remaining.getBody(), StandardCharsets.UTF_8)).isEqualTo("{}");
+                return null;
+            });
+            await(() -> deadLetters(operation) == 2);
+        } finally {
+            rabbit.execute(channel -> channel.queueDelete(otherSubscriber));
+        }
+    }
+
+    private Message recoveryMessage(byte[] body, String eventId) {
+        // Como no painel: manter bytes e identidade, sem headers da entrega anterior.
+        MessageProperties properties = new MessageProperties();
+        properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+        properties.setContentEncoding(StandardCharsets.UTF_8.name());
+        properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+        properties.setMessageId(eventId);
+        return new Message(body, properties);
     }
 
     private Order order(StatusOrder status) {
