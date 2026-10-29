@@ -2,10 +2,12 @@ package com.gustavoronchi.microsservico_pedido.service;
 
 import com.gustavoronchi.microsservico_pedido.client.StockClient;
 import com.gustavoronchi.microsservico_pedido.config.RabbitMQConfig;
+import com.gustavoronchi.microsservico_pedido.domain.entities.CatalogProduct;
 import com.gustavoronchi.microsservico_pedido.domain.entities.Order;
 import com.gustavoronchi.microsservico_pedido.domain.entities.OrderItem;
 import com.gustavoronchi.microsservico_pedido.domain.entities.OutboxEvent;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OrderRepository;
+import com.gustavoronchi.microsservico_pedido.domain.repository.CatalogProductRepository;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OutboxEventRepository;
 import com.gustavoronchi.microsservico_pedido.dto.*;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
@@ -29,8 +31,10 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -42,13 +46,15 @@ public class OrderService {
     private final OutboxEventRepository outboxRepository;
     private final JsonMapper jsonMapper;
     private final TransactionTemplate transactionTemplate;
+    private final CatalogProductRepository catalogProducts;
 
-    public OrderService(OrderRepository orderRepository, StockClient stockClient, OutboxEventRepository outboxRepository, JsonMapper jsonMapper, TransactionTemplate transactionTemplate) {
+    public OrderService(OrderRepository orderRepository, StockClient stockClient, OutboxEventRepository outboxRepository, JsonMapper jsonMapper, TransactionTemplate transactionTemplate, CatalogProductRepository catalogProducts) {
         this.orderRepository = orderRepository;
         this.stockClient = stockClient;
         this.outboxRepository = outboxRepository;
         this.jsonMapper = jsonMapper;
         this.transactionTemplate = transactionTemplate;
+        this.catalogProducts = catalogProducts;
     }
 
     @Transactional(readOnly = true)
@@ -152,15 +158,13 @@ public class OrderService {
         if (prices == null) {
             throw new StockUnavailableException("Catálogo retornou uma resposta vazia.");
         }
+        updateCatalogCopy(prices, quantities.keySet());
         for (ProductPriceDTO product : prices) {
             Integer requested = quantities.get(product.getProductId());
             if (requested == null) {
                 continue;
             }
             Integer available = product.getAvailableStock();
-            if (available == null || available < 0) {
-                throw new StockUnavailableException("Catálogo não retornou disponibilidade válida para o produto " + product.getProductId());
-            }
             if (requested > available) {
                 String message = available == 0
                         ? "Produto fora de estoque: " + product.getProductId()
@@ -177,6 +181,36 @@ public class OrderService {
                 return concurrent;
             }
             throw ex;
+        }
+    }
+
+    private void updateCatalogCopy(List<ProductPriceDTO> prices, Set<UUID> requestedIds) {
+        Set<UUID> returnedIds = new HashSet<>();
+        for (ProductPriceDTO product : prices) {
+            if (product == null || product.getProductId() == null || product.getPrice() == null
+                    || product.getPrice().signum() < 0 || !returnedIds.add(product.getProductId())) {
+                throw new StockUnavailableException("Catálogo retornou dados de produto inválidos.");
+            }
+            if (product.getAvailableStock() == null || product.getAvailableStock() < 0) {
+                throw new StockUnavailableException("Catálogo não retornou disponibilidade válida para o produto " + product.getProductId());
+            }
+        }
+        for (UUID productId : requestedIds) {
+            if (!returnedIds.contains(productId)) {
+                throw new IllegalStateException("Catálogo não retornou preço para o produto " + productId);
+            }
+        }
+
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        List<CatalogProduct> copies = prices.stream()
+                .sorted(java.util.Comparator.comparing(ProductPriceDTO::getProductId))
+                .map(product -> new CatalogProduct(product.getProductId(), product.getPrice(), product.getAvailableStock(), now))
+                .toList();
+        try {
+            transactionTemplate.executeWithoutResult(status -> catalogProducts.saveAllAndFlush(copies));
+        } catch (DataIntegrityViolationException ex) {
+            // Outra consulta pode ter inserido o produto. Repetir o upsert após o rollback.
+            transactionTemplate.executeWithoutResult(status -> catalogProducts.saveAllAndFlush(copies));
         }
     }
 

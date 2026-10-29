@@ -1,6 +1,8 @@
 package com.gustavoronchi.microsservico_pedido.service;
 
 import com.gustavoronchi.microsservico_pedido.client.StockClient;
+import com.gustavoronchi.microsservico_pedido.domain.entities.CatalogProduct;
+import com.gustavoronchi.microsservico_pedido.domain.repository.CatalogProductRepository;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OrderRepository;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OutboxEventRepository;
 import com.gustavoronchi.microsservico_pedido.resource.OrderResource;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -28,11 +31,14 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -73,6 +79,8 @@ class OrderStockTimeoutTests {
     private OrderRepository orders;
     @Autowired
     private OutboxEventRepository events;
+    @Autowired
+    private CatalogProductRepository catalogProducts;
 
     private MockMvc mvc;
 
@@ -85,6 +93,7 @@ class OrderStockTimeoutTests {
     void setUp() {
         events.deleteAll();
         orders.deleteAll();
+        catalogProducts.deleteAll();
         failure = null;
         releaseResponse = new CountDownLatch(1);
         stockRequests.clear();
@@ -121,9 +130,11 @@ class OrderStockTimeoutTests {
 
         // The server withholds its response for 10s; the configured client must give up first.
         assertTimeoutPreemptively(Duration.ofSeconds(5),
-                () -> createOrder(REQUEST, key).andExpect(status().isServiceUnavailable()));
+                () -> createOrder(REQUEST, key).andExpect(
+                        mode == Failure.HTTP_404 ? status().isBadRequest() : status().isServiceUnavailable()));
         assertThat(orders.count()).isZero();
         assertThat(events.count()).isZero();
+        assertThat(catalogProducts.count()).isZero();
         assertThat(stockRequests).hasSize(mode == Failure.CONNECTION_REFUSED ? 0 : 1);
 
         releaseResponse.countDown();
@@ -136,6 +147,32 @@ class OrderStockTimeoutTests {
                 .andExpect(jsonPath("$.totalValue").value(20.00));
         assertThat(orders.count()).isEqualTo(1);
         assertThat(events.count()).isEqualTo(1);
+        assertThat(catalogProducts.count()).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(Failure.class)
+    void stockFailurePreservesCopyAndDoesNotUseItToCreateOrder(Failure mode) throws Exception {
+        UUID productId = UUID.fromString(PRODUCT_ID);
+        Instant updatedAt = Instant.parse("2026-01-01T00:00:00Z");
+        catalogProducts.saveAndFlush(new CatalogProduct(productId, new BigDecimal("8.00"), 100, updatedAt));
+        failure = mode;
+        if (mode == Failure.CONNECTION_REFUSED) {
+            stock.stop(0);
+            stock = null;
+        }
+
+        assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> createOrder(REQUEST, "cached-product").andExpect(
+                        mode == Failure.HTTP_404 ? status().isBadRequest() : status().isServiceUnavailable()));
+
+        assertThat(catalogProducts.count()).isEqualTo(1);
+        CatalogProduct saved = catalogProducts.findById(productId).orElseThrow();
+        assertThat(saved.getPrice()).isEqualByComparingTo("8.00");
+        assertThat(saved.getAvailableStock()).isEqualTo(100);
+        assertThat(saved.getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(orders.count()).isZero();
+        assertThat(events.count()).isZero();
     }
 
     @Test
@@ -192,11 +229,14 @@ class OrderStockTimeoutTests {
                             + new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
                     byte[] body = ("[{\"productId\":\"" + PRODUCT_ID
                             + "\",\"price\":10.00,\"availableStock\":50}]").getBytes(StandardCharsets.UTF_8);
+                    if (current == Failure.INVALID_JSON) {
+                        body = "invalid-json".getBytes(StandardCharsets.UTF_8);
+                    }
                     if (current == Failure.SLOW_HEADERS) {
                         release.await(10, TimeUnit.SECONDS);
                     }
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
-                    exchange.sendResponseHeaders(current == Failure.HTTP_503 ? 503 : 200, body.length);
+                    exchange.sendResponseHeaders(current == Failure.HTTP_503 ? 503 : current == Failure.HTTP_404 ? 404 : 200, body.length);
                     if (current == Failure.SLOW_BODY) {
                         exchange.getResponseBody().write(body, 0, 1);
                         exchange.getResponseBody().flush();
@@ -218,7 +258,7 @@ class OrderStockTimeoutTests {
         }
     }
 
-    enum Failure { SLOW_HEADERS, SLOW_BODY, CONNECTION_REFUSED, HTTP_503 }
+    enum Failure { SLOW_HEADERS, SLOW_BODY, CONNECTION_REFUSED, HTTP_503, HTTP_404, INVALID_JSON }
 
     @TestConfiguration
     static class JsonConfig {

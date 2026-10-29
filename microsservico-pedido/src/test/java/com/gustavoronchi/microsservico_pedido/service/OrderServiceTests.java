@@ -1,6 +1,8 @@
 package com.gustavoronchi.microsservico_pedido.service;
 
 import com.gustavoronchi.microsservico_pedido.client.StockClient;
+import com.gustavoronchi.microsservico_pedido.domain.entities.CatalogProduct;
+import com.gustavoronchi.microsservico_pedido.domain.repository.CatalogProductRepository;
 import com.gustavoronchi.microsservico_pedido.domain.entities.OutboxEvent;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OrderRepository;
 import com.gustavoronchi.microsservico_pedido.domain.repository.OutboxEventRepository;
@@ -11,6 +13,7 @@ import com.gustavoronchi.microsservico_pedido.dto.StockItemRequestDTO;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import com.gustavoronchi.microsservico_pedido.exception.InvalidOrderRequestException;
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
+import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
 import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.PaymentApprovedEvent;
 import com.gustavoronchi.microsservico_pedido.messaging.PaymentApprovedListener;
@@ -49,6 +52,7 @@ import tools.jackson.databind.json.JsonMapper;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -82,6 +86,8 @@ class OrderServiceTests {
     @Autowired
     private OrderRepository orders;
     @Autowired
+    private CatalogProductRepository catalogProducts;
+    @Autowired
     private JsonMapper jsonMapper;
     @MockitoSpyBean
     private OutboxEventRepository events;
@@ -105,12 +111,100 @@ class OrderServiceTests {
     void setUp() {
         events.deleteAll();
         orders.deleteAll();
+        catalogProducts.deleteAll();
         firstPrice = new ProductPriceDTO(firstProductId, new BigDecimal("10.00"), 50);
         when(stockClient.findPrices(any())).thenAnswer(invocation -> {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             return List.of(firstPrice, new ProductPriceDTO(secondProductId, new BigDecimal("20.00"), 50));
         });
         mvc = MockMvcBuilders.standaloneSetup(new OrderResource(orderService)).build();
+    }
+
+    @Test
+    void savesOneCatalogCopyPerProductWithReportedAvailability() {
+        Instant before = Instant.now().minusSeconds(1);
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, 2), new OrderItemRequestDTO(firstProductId, 3),
+                new OrderItemRequestDTO(secondProductId, 1)));
+
+        orderService.createOrder(request);
+
+        assertThat(catalogProducts.count()).isEqualTo(2);
+        CatalogProduct first = catalogProducts.findById(firstProductId).orElseThrow();
+        assertThat(first.getPrice()).isEqualByComparingTo("10.00");
+        assertThat(first.getAvailableStock()).isEqualTo(50);
+        assertThat(first.getUpdatedAt()).isBetween(before, Instant.now());
+        CatalogProduct second = catalogProducts.findById(secondProductId).orElseThrow();
+        assertThat(second.getPrice()).isEqualByComparingTo("20.00");
+        assertThat(second.getAvailableStock()).isEqualTo(50);
+        assertThat(second.getUpdatedAt()).isEqualTo(first.getUpdatedAt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 7})
+    void validQueryUpdatesExistingCopyEvenWhenAvailabilityRejectsOrder(int available) throws Exception {
+        var original = orderService.createOrder(request(1));
+        CatalogProduct previous = catalogProducts.findById(firstProductId).orElseThrow();
+        previous.setUpdatedAt(Instant.parse("2026-01-01T00:00:00Z"));
+        catalogProducts.saveAndFlush(previous);
+        firstPrice.setPrice(new BigDecimal("12.50"));
+        firstPrice.setAvailableStock(available);
+
+        mvc.perform(post("/orders").contentType(MediaType.APPLICATION_JSON)
+                        .content(jsonMapper.writeValueAsString(request(2))))
+                .andExpect(available == 0 ? status().isConflict() : status().isCreated());
+
+        assertThat(catalogProducts.count()).isEqualTo(2);
+        CatalogProduct updated = catalogProducts.findById(firstProductId).orElseThrow();
+        assertThat(updated.getPrice()).isEqualByComparingTo("12.50");
+        assertThat(updated.getAvailableStock()).isEqualTo(available);
+        assertThat(updated.getUpdatedAt()).isAfter(previous.getUpdatedAt());
+        assertThat(orderService.findById(original.getOrderId()).getTotalValue()).isEqualByComparingTo("10.00");
+        assertThat(orders.count()).isEqualTo(available == 0 ? 1 : 2);
+        assertThat(events.count()).isEqualTo(orders.count());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nullResponse", "empty", "missing", "nullProduct", "nullId", "nullPrice",
+            "negativePrice", "nullAvailability", "negativeAvailability", "duplicate"})
+    void invalidResponsePreservesEntireCatalogCopy(String invalidField) {
+        Instant updatedAt = Instant.parse("2026-01-01T00:00:00Z");
+        catalogProducts.saveAllAndFlush(List.of(
+                new CatalogProduct(firstProductId, new BigDecimal("8.00"), 3, updatedAt),
+                new CatalogProduct(secondProductId, new BigDecimal("9.00"), 4, updatedAt)));
+        ProductPriceDTO second = new ProductPriceDTO(secondProductId, new BigDecimal("20.00"), 50);
+        List<ProductPriceDTO> response = new ArrayList<>(List.of(firstPrice, second));
+        switch (invalidField) {
+            case "nullResponse" -> response = null;
+            case "empty" -> response.clear();
+            case "missing" -> response.removeLast();
+            case "nullProduct" -> response.set(1, null);
+            case "nullId" -> second.setProductId(null);
+            case "nullPrice" -> second.setPrice(null);
+            case "negativePrice" -> second.setPrice(new BigDecimal("-1.00"));
+            case "nullAvailability" -> second.setAvailableStock(null);
+            case "negativeAvailability" -> second.setAvailableStock(-1);
+            case "duplicate" -> response.add(firstPrice);
+            default -> throw new IllegalArgumentException(invalidField);
+        }
+        when(stockClient.findPrices(any())).thenReturn(response);
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, 1), new OrderItemRequestDTO(secondProductId, 1)));
+
+        assertThatThrownBy(() -> orderService.createOrder(request, "invalid-catalog"))
+                .isInstanceOfAny(StockUnavailableException.class, IllegalStateException.class);
+
+        assertThat(catalogProducts.count()).isEqualTo(2);
+        CatalogProduct first = catalogProducts.findById(firstProductId).orElseThrow();
+        assertThat(first.getPrice()).isEqualByComparingTo("8.00");
+        assertThat(first.getAvailableStock()).isEqualTo(3);
+        assertThat(first.getUpdatedAt()).isEqualTo(updatedAt);
+        CatalogProduct savedSecond = catalogProducts.findById(secondProductId).orElseThrow();
+        assertThat(savedSecond.getPrice()).isEqualByComparingTo("9.00");
+        assertThat(savedSecond.getAvailableStock()).isEqualTo(4);
+        assertThat(savedSecond.getUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(orders.count()).isZero();
+        assertThat(events.count()).isZero();
     }
 
     @Test
@@ -159,6 +253,7 @@ class OrderServiceTests {
                 .andExpect(status().isCreated()).andReturn().getResponse();
         UUID orderId = UUID.fromString(jsonMapper.readTree(first.getContentAsString()).get("orderId").asString());
         UUID eventId = events.findAll().getFirst().getEventId();
+        Instant catalogUpdatedAt = catalogProducts.findById(firstProductId).orElseThrow().getUpdatedAt();
         orderService.approvePayment(orderId, new BigDecimal("20.00"));
         firstPrice.setPrice(new BigDecimal("999.00"));
         firstPrice.setAvailableStock(0);
@@ -174,6 +269,7 @@ class OrderServiceTests {
 
         assertThat(repeated.getHeader("Location")).isEqualTo(first.getHeader("Location"));
         verify(stockClient).findPrices(List.of(firstProductId));
+        assertThat(catalogProducts.findById(firstProductId).orElseThrow().getUpdatedAt()).isEqualTo(catalogUpdatedAt);
         assertThat(orders.count()).isEqualTo(1);
         assertThat(events.findAll()).singleElement()
                 .satisfies(event -> assertThat(event.getEventId()).isEqualTo(eventId));
@@ -266,6 +362,7 @@ class OrderServiceTests {
 
         assertThat(responses.stream().map(response -> response.getStatus()).toList())
                 .containsExactlyInAnyOrder(201, differentQuantity ? 409 : 201);
+        assertThat(catalogProducts.count()).isEqualTo(1);
         var saved = orders.findByIdempotencyKey("concurrent-checkout").orElseThrow();
         for (var response : responses) {
             if (response.getStatus() == 201) {
