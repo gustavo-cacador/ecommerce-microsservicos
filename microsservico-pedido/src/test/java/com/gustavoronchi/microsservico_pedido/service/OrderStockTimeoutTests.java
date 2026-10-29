@@ -15,6 +15,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -152,9 +154,9 @@ class OrderStockTimeoutTests {
 
     @ParameterizedTest
     @EnumSource(Failure.class)
-    void stockFailurePreservesCopyAndDoesNotUseItToCreateOrder(Failure mode) throws Exception {
+    void stockFailurePreservesExpiredCopyWithoutCreatingOrder(Failure mode) throws Exception {
         UUID productId = UUID.fromString(PRODUCT_ID);
-        Instant updatedAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant updatedAt = Instant.now().minus(Duration.ofHours(25)).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         catalogProducts.saveAndFlush(new CatalogProduct(productId, new BigDecimal("8.00"), 100, updatedAt));
         failure = mode;
         if (mode == Failure.CONNECTION_REFUSED) {
@@ -173,6 +175,86 @@ class OrderStockTimeoutTests {
         assertThat(saved.getUpdatedAt()).isEqualTo(updatedAt);
         assertThat(orders.count()).isZero();
         assertThat(events.count()).isZero();
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = Failure.class, names = {"SLOW_HEADERS", "SLOW_BODY", "CONNECTION_REFUSED", "HTTP_500", "HTTP_503"})
+    void technicalFailureCreatesOrderAndOutboxUsingFreshCopy(Failure mode) throws Exception {
+        Instant updatedAt = Instant.now().minus(Duration.ofHours(23)).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        UUID productId = UUID.fromString(PRODUCT_ID);
+        catalogProducts.saveAndFlush(new CatalogProduct(productId, new BigDecimal("8.00"), 0, updatedAt));
+        failure = mode;
+        if (mode == Failure.CONNECTION_REFUSED) {
+            stock.stop(0);
+            stock = null;
+        }
+
+        assertTimeoutPreemptively(Duration.ofSeconds(5),
+                () -> createOrder(REQUEST, "fallback-key").andExpect(status().isCreated())
+                        .andExpect(jsonPath("$.status").value("CREATED"))
+                        .andExpect(jsonPath("$.items[0].unitValue").value(8.00))
+                        .andExpect(jsonPath("$.totalValue").value(16.00)));
+
+        var order = orders.findByIdempotencyKey("fallback-key").orElseThrow();
+        assertThat(orders.count()).isEqualTo(1);
+        assertThat(events.findAll()).singleElement().satisfies(event -> {
+            assertThat(event.getOrderId()).isEqualTo(order.getId());
+            assertThat(event.getExchange()).isEqualTo("order.created");
+            assertThat(event.getPublishedAt()).isNull();
+            assertThat(JsonMapper.builder().build().readTree(event.getPayload()).get("amount").decimalValue())
+                    .isEqualByComparingTo("16.00");
+        });
+        assertThat(catalogProducts.findById(productId).orElseThrow().getUpdatedAt()).isEqualTo(updatedAt);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = Failure.class, names = {"HTTP_400", "HTTP_401", "HTTP_404", "HTTP_409", "HTTP_429", "INVALID_JSON", "TRUNCATED_JSON", "INVALID_ENCODING"})
+    void nonTechnicalFailureDoesNotUseFreshCopy(Failure mode) throws Exception {
+        catalogProducts.saveAndFlush(new CatalogProduct(UUID.fromString(PRODUCT_ID), new BigDecimal("8.00"), 50, Instant.now()));
+        failure = mode;
+
+        createOrder(REQUEST, "invalid-key").andExpect(
+                mode == Failure.HTTP_404 ? status().isBadRequest() : status().isServiceUnavailable());
+
+        assertThat(orders.count()).isZero();
+        assertThat(events.count()).isZero();
+        assertThat(catalogProducts.findById(UUID.fromString(PRODUCT_ID)).orElseThrow().getPrice())
+                .isEqualByComparingTo("8.00");
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "fallback-key")
+    void fallbackPreservesPricesAndIdempotencyAfterRecovery(String key) throws Exception {
+        catalogProducts.saveAndFlush(new CatalogProduct(UUID.fromString(PRODUCT_ID), new BigDecimal("8.00"), 0, Instant.now()));
+        failure = Failure.HTTP_503;
+        var first = createOrder(REQUEST, key).andExpect(status().isCreated()).andReturn().getResponse();
+        String orderId = JsonMapper.builder().build().readTree(first.getContentAsString()).get("orderId").asString();
+        var event = events.findAll().getFirst();
+        catalogProducts.deleteAll();
+        if (key != null) {
+            createOrder(REQUEST, key).andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.orderId").value(orderId));
+            createOrder(REQUEST.replace("\"quantity\":2", "\"quantity\":3"), key).andExpect(status().isConflict());
+            assertThat(stockRequests).hasSize(1);
+        }
+
+        failure = null;
+        createOrder(REQUEST, "recovered-key").andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalValue").value(20.00));
+        assertThat(catalogProducts.findById(UUID.fromString(PRODUCT_ID)).orElseThrow().getPrice()).isEqualByComparingTo("10.00");
+        if (key != null) {
+            createOrder(REQUEST, key).andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.orderId").value(orderId))
+                    .andExpect(jsonPath("$.totalValue").value(16.00));
+            assertThat(stockRequests).hasSize(2);
+        }
+        var saved = orderService.findById(UUID.fromString(orderId));
+        assertThat(saved.getTotalValue()).isEqualByComparingTo("16.00");
+        assertThat(saved.getItems().getFirst().getUnitValue()).isEqualByComparingTo("8.00");
+        assertThat(orders.count()).isEqualTo(2);
+        assertThat(events.count()).isEqualTo(2);
+        assertThat(events.findById(event.getEventId()).orElseThrow().getPayload()).isEqualTo(event.getPayload());
     }
 
     @Test
@@ -232,11 +314,19 @@ class OrderStockTimeoutTests {
                     if (current == Failure.INVALID_JSON) {
                         body = "invalid-json".getBytes(StandardCharsets.UTF_8);
                     }
+                    if (current == Failure.TRUNCATED_JSON) {
+                        body = "[{\"productId\":".getBytes(StandardCharsets.UTF_8);
+                    }
+                    if (current == Failure.INVALID_ENCODING) {
+                        body = new byte[] {0, 0, (byte) 0xFE, (byte) 0xFF, 0, 0x11, 0, 0};
+                    }
                     if (current == Failure.SLOW_HEADERS) {
                         release.await(10, TimeUnit.SECONDS);
                     }
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
-                    exchange.sendResponseHeaders(current == Failure.HTTP_503 ? 503 : current == Failure.HTTP_404 ? 404 : 200, body.length);
+                    int status = current != null && current.name().startsWith("HTTP_")
+                            ? Integer.parseInt(current.name().substring(5)) : 200;
+                    exchange.sendResponseHeaders(status, body.length);
                     if (current == Failure.SLOW_BODY) {
                         exchange.getResponseBody().write(body, 0, 1);
                         exchange.getResponseBody().flush();
@@ -258,7 +348,8 @@ class OrderStockTimeoutTests {
         }
     }
 
-    enum Failure { SLOW_HEADERS, SLOW_BODY, CONNECTION_REFUSED, HTTP_503, HTTP_404, INVALID_JSON }
+    enum Failure { SLOW_HEADERS, SLOW_BODY, CONNECTION_REFUSED, HTTP_500, HTTP_503,
+        HTTP_400, HTTP_401, HTTP_404, HTTP_409, HTTP_429, INVALID_JSON, TRUNCATED_JSON, INVALID_ENCODING }
 
     @TestConfiguration
     static class JsonConfig {

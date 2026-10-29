@@ -28,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -74,7 +75,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@DataJpaTest(showSql = false, properties = "spring.sql.init.mode=never")
+@DataJpaTest(showSql = false, properties = {"spring.sql.init.mode=never", "catalog.fallback.max-age=PT2H"})
 @Import({OrderService.class, StockReservedListener.class,
         PaymentApprovedListener.class, PaymentRefusedListener.class,
         StockReservationFailedListener.class, OrderServiceTests.JsonConfig.class})
@@ -168,7 +169,7 @@ class OrderServiceTests {
     @ValueSource(strings = {"nullResponse", "empty", "missing", "nullProduct", "nullId", "nullPrice",
             "negativePrice", "nullAvailability", "negativeAvailability", "duplicate"})
     void invalidResponsePreservesEntireCatalogCopy(String invalidField) {
-        Instant updatedAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant updatedAt = Instant.now().minusSeconds(60).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         catalogProducts.saveAllAndFlush(List.of(
                 new CatalogProduct(firstProductId, new BigDecimal("8.00"), 3, updatedAt),
                 new CatalogProduct(secondProductId, new BigDecimal("9.00"), 4, updatedAt)));
@@ -205,6 +206,41 @@ class OrderServiceTests {
         assertThat(savedSecond.getUpdatedAt()).isEqualTo(updatedAt);
         assertThat(orders.count()).isZero();
         assertThat(events.count()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "expired", "fresh"})
+    void fallbackRequiresEveryProductWithinConfiguredMaxAge(String state) throws Exception {
+        Instant fresh = Instant.now().minusSeconds(3600).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        catalogProducts.saveAndFlush(new CatalogProduct(firstProductId, new BigDecimal("8.00"), 0, fresh));
+        if (!state.equals("missing")) {
+            catalogProducts.saveAndFlush(new CatalogProduct(secondProductId, new BigDecimal("9.00"), 0,
+                    state.equals("expired") ? fresh.minusSeconds(7200) : fresh));
+        }
+        when(stockClient.findPrices(any())).thenThrow(new ResourceAccessException("Conexão recusada"));
+        OrderRequestDTO request = new OrderRequestDTO(UUID.randomUUID(), List.of(
+                new OrderItemRequestDTO(firstProductId, 2), new OrderItemRequestDTO(secondProductId, 1),
+                new OrderItemRequestDTO(firstProductId, 3)));
+
+        mvc.perform(post("/orders").header("Idempotency-Key", "all-products")
+                        .contentType(MediaType.APPLICATION_JSON).content(jsonMapper.writeValueAsString(request)))
+                .andExpect(state.equals("fresh") ? status().isCreated() : status().isServiceUnavailable());
+
+        assertThat(orders.count()).isEqualTo(state.equals("fresh") ? 1 : 0);
+        assertThat(events.count()).isEqualTo(orders.count());
+        assertThat(catalogProducts.findById(firstProductId).orElseThrow().getUpdatedAt()).isEqualTo(fresh);
+        if (state.equals("fresh")) {
+            var saved = orders.findByIdempotencyKey("all-products").orElseThrow();
+            assertThat(saved.getTotalValue()).isEqualByComparingTo("49.00");
+            orderService.cancelForStockFailure(saved.getId());
+            assertThat(orderService.findById(saved.getId()).getStatus()).isEqualTo(StatusOrder.CANCELED);
+            assertThat(events.count()).isEqualTo(1);
+        } else {
+            catalogProducts.saveAndFlush(new CatalogProduct(secondProductId, new BigDecimal("9.00"), 0, fresh));
+            assertThat(orderService.createOrder(request, "all-products").getTotalValue()).isEqualByComparingTo("49.00");
+            assertThat(orders.count()).isEqualTo(1);
+            assertThat(events.count()).isEqualTo(1);
+        }
     }
 
     @Test
@@ -339,16 +375,22 @@ class OrderServiceTests {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void concurrentRequestsWithSameKeyCreateOnlyOneOrderAndEvent(boolean differentQuantity) throws Exception {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void concurrentRequestsWithSameKeyCreateOnlyOneOrderAndEvent(boolean differentQuantity, boolean fallback) throws Exception {
         OrderRequestDTO first = request(1);
         OrderRequestDTO second = new OrderRequestDTO(first.getClientId(),
                 List.of(new OrderItemRequestDTO(firstProductId, differentQuantity ? 2 : 1)));
         CountDownLatch catalogCalls = new CountDownLatch(2);
+        if (fallback) {
+            catalogProducts.saveAndFlush(new CatalogProduct(firstProductId, BigDecimal.TEN, 0, Instant.now()));
+        }
         when(stockClient.findPrices(any())).thenAnswer(invocation -> {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
             catalogCalls.countDown();
             assertThat(catalogCalls.await(5, TimeUnit.SECONDS)).isTrue();
+            if (fallback) {
+                throw new ResourceAccessException("Conexão recusada");
+            }
             return List.of(firstPrice);
         });
 

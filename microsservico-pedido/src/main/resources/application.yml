@@ -40,3 +40,7 @@ clients:
     url: http://localhost:8081
     connect-timeout-ms: 1000
     read-timeout-ms: 2000
+
+catalog:
+  fallback:
+    max-age: PT24H

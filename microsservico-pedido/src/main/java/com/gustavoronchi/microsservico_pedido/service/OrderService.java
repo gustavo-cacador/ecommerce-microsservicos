@@ -17,6 +17,7 @@ import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockExcepti
 import com.gustavoronchi.microsservico_pedido.exception.OrderNotFoundException;
 import com.gustavoronchi.microsservico_pedido.exception.StockUnavailableException;
 import com.gustavoronchi.microsservico_pedido.messaging.OrderCreatedEvent;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -25,9 +26,17 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
+import java.net.http.HttpTimeoutException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -47,14 +56,20 @@ public class OrderService {
     private final JsonMapper jsonMapper;
     private final TransactionTemplate transactionTemplate;
     private final CatalogProductRepository catalogProducts;
+    private final Duration catalogMaxAge;
 
-    public OrderService(OrderRepository orderRepository, StockClient stockClient, OutboxEventRepository outboxRepository, JsonMapper jsonMapper, TransactionTemplate transactionTemplate, CatalogProductRepository catalogProducts) {
+    public OrderService(OrderRepository orderRepository, StockClient stockClient, OutboxEventRepository outboxRepository, JsonMapper jsonMapper, TransactionTemplate transactionTemplate, CatalogProductRepository catalogProducts,
+                        @Value("${catalog.fallback.max-age:PT24H}") Duration catalogMaxAge) {
         this.orderRepository = orderRepository;
         this.stockClient = stockClient;
         this.outboxRepository = outboxRepository;
         this.jsonMapper = jsonMapper;
         this.transactionTemplate = transactionTemplate;
         this.catalogProducts = catalogProducts;
+        if (catalogMaxAge.isNegative() || catalogMaxAge.isZero()) {
+            throw new IllegalArgumentException("A idade máxima do catálogo deve ser positiva.");
+        }
+        this.catalogMaxAge = catalogMaxAge;
     }
 
     @Transactional(readOnly = true)
@@ -147,12 +162,29 @@ public class OrderService {
             return existing;
         }
 
+        List<ProductPriceDTO> prices = findPrices(quantities);
+        try {
+            return transactionTemplate.execute(status -> create(request, prices, idempotencyKey));
+        } catch (DataIntegrityViolationException ex) {
+            // A requisição concorrente pode ter gravado a mesma chave. Consultar após o rollback.
+            OrderResponseDTO concurrent = findIdempotentOrder(idempotencyKey, request.getClientId(), quantities);
+            if (concurrent != null) {
+                return concurrent;
+            }
+            throw ex;
+        }
+    }
+
+    private List<ProductPriceDTO> findPrices(Map<UUID, Integer> quantities) {
         List<ProductPriceDTO> prices;
         try {
             prices = stockClient.findPrices(List.copyOf(quantities.keySet()));
         } catch (HttpClientErrorException.NotFound ex) {
             throw new InvalidOrderRequestException("Pedido contém produto inexistente ou inativo.");
         } catch (RestClientException ex) {
+            if (allowsCatalogFallback(ex)) {
+                return findCatalogCopy(quantities.keySet());
+            }
             throw new StockUnavailableException("Não foi possível consultar os preços: " + ex.getMessage());
         }
         if (prices == null) {
@@ -172,16 +204,37 @@ public class OrderService {
                 throw new InsufficientStockException(message);
             }
         }
-        try {
-            return transactionTemplate.execute(status -> create(request, prices, idempotencyKey));
-        } catch (DataIntegrityViolationException ex) {
-            // A requisição concorrente pode ter gravado a mesma chave. Consultar após o rollback.
-            OrderResponseDTO concurrent = findIdempotentOrder(idempotencyKey, request.getClientId(), quantities);
-            if (concurrent != null) {
-                return concurrent;
-            }
-            throw ex;
+        return prices;
+    }
+
+    private boolean allowsCatalogFallback(RestClientException exception) {
+        if (exception instanceof RestClientResponseException response) {
+            return response.getStatusCode().is5xxServerError();
         }
+        if (exception instanceof ResourceAccessException) {
+            return true;
+        }
+        // O corpo pode falhar por transporte ou por codificação inválida; só o primeiro permite fallback.
+        for (Throwable cause = exception.getCause(); cause != null; cause = cause.getCause()) {
+            if (cause instanceof HttpTimeoutException || cause instanceof SocketTimeoutException
+                    || cause instanceof SocketException || cause instanceof UnknownHostException
+                    || (cause.getClass() == IOException.class && cause.getCause() == null)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<ProductPriceDTO> findCatalogCopy(Set<UUID> productIds) {
+        Instant oldestAllowed = Instant.now().minus(catalogMaxAge);
+        List<CatalogProduct> copies = catalogProducts.findAllById(productIds);
+        if (copies.size() != productIds.size() || copies.stream()
+                .anyMatch(product -> product.getUpdatedAt().isBefore(oldestAllowed))) {
+            throw new StockUnavailableException("Catálogo indisponível e cópia local ausente ou vencida.");
+        }
+        // Disponibilidade copiada não garante reserva; o estoque decidirá pelo fluxo assíncrono.
+        return copies.stream().map(product -> new ProductPriceDTO(
+                product.getProductId(), product.getPrice(), product.getAvailableStock())).toList();
     }
 
     private void updateCatalogCopy(List<ProductPriceDTO> prices, Set<UUID> requestedIds) {
