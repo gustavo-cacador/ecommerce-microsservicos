@@ -18,6 +18,7 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +67,14 @@ final class CheckoutEnvironment implements AutoCloseable {
         return orders;
     }
 
+    HttpRequest.Builder rabbitRequest(String path) {
+        String credentials = rabbit.getAdminUsername() + ":" + rabbit.getAdminPassword();
+        String authorization = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+        return HttpRequest.newBuilder(URI.create(rabbit.getHttpUrl() + "/api/" + path))
+                .header("Authorization", "Basic " + authorization)
+                .header("Content-Type", "application/json");
+    }
+
     JsonNode get(URI uri) throws IOException, InterruptedException {
         return send(HttpRequest.newBuilder(uri).GET(), 200);
     }
@@ -79,10 +88,20 @@ final class CheckoutEnvironment implements AutoCloseable {
     }
 
     String queryStatus(String service, String sql, UUID orderId) throws SQLException {
+        return queryColumn(service, sql, orderId).stream().findFirst().orElse(null);
+    }
+
+    List<String> queryColumn(String service, String sql, UUID... ids) throws SQLException {
         try (var statement = databases.get(service).prepareStatement(sql)) {
-            statement.setObject(1, orderId);
+            for (int i = 0; i < ids.length; i++) {
+                statement.setObject(i + 1, ids[i]);
+            }
             try (var rows = statement.executeQuery()) {
-                return rows.next() ? rows.getString("status") : null;
+                List<String> values = new ArrayList<>();
+                while (rows.next()) {
+                    values.add(rows.getString(1));
+                }
+                return values;
             }
         }
     }
