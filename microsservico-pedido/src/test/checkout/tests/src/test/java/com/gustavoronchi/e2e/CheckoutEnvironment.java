@@ -89,8 +89,9 @@ final class CheckoutEnvironment implements AutoCloseable {
 
     private URI startService(String name, Path logs, String... properties) throws IOException, SQLException {
         String artifact = "microsservico-" + name;
-        Path jar = Path.of("..", "..", artifact, "target", artifact + "-0.0.1-SNAPSHOT.jar").toAbsolutePath();
-        assertThat(jar).as("JAR do serviço %s. Execute e2e/run.ps1.", name).isRegularFile();
+        Path repository = Path.of("..", "..", "..", "..", "..").toAbsolutePath().normalize();
+        Path jar = repository.resolve(Path.of(artifact, "target", artifact + "-0.0.1-SNAPSHOT.jar"));
+        assertThat(jar).as("JAR do serviço %s. Execute microsservico-pedido/src/test/checkout/run.ps1.", name).isRegularFile();
 
         // A conexão local mantém o banco em memória enquanto o serviço acessa o mesmo banco via TCP.
         String database = "mem:" + name + "-" + UUID.randomUUID();

@@ -9,8 +9,8 @@
     <packaging>pom</packaging>
 
     <modules>
-        <module>../microsservico-estoque</module>
-        <module>../microsservico-pagamento</module>
-        <module>../microsservico-pedido</module>
+        <module>../../../../microsservico-estoque</module>
+        <module>../../../../microsservico-pagamento</module>
+        <module>../../..</module>
     </modules>
 </project>
