@@ -1,9 +1,11 @@
 package com.gustavoronchi.microsservico_estoque.dto;
 
 import com.gustavoronchi.microsservico_estoque.domain.entities.Category;
+import jakarta.validation.constraints.NotBlank;
 
 public class CategoryRequestDTO {
 
+    @NotBlank
     private String name;
 
     public CategoryRequestDTO() {

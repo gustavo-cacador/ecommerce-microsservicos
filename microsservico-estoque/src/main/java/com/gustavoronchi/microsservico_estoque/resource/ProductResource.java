@@ -4,6 +4,9 @@ import com.gustavoronchi.microsservico_estoque.dto.ProductRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductResponseDTO;
 import com.gustavoronchi.microsservico_estoque.dto.ProductPriceDTO;
 import com.gustavoronchi.microsservico_estoque.service.ProductService;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
@@ -38,7 +41,7 @@ public class ProductResource {
     }
 
     @PostMapping
-    public ResponseEntity<ProductResponseDTO> create(@RequestBody ProductRequestDTO dto) {
+    public ResponseEntity<ProductResponseDTO> create(@Valid @RequestBody ProductRequestDTO dto) {
         ProductResponseDTO response = productService.create(dto);
 
         URI uri = ServletUriComponentsBuilder
@@ -51,14 +54,14 @@ public class ProductResource {
     }
 
     @PostMapping("prices")
-    public ResponseEntity<List<ProductPriceDTO>> findPrices(@RequestBody List<UUID> productIds) {
+    public ResponseEntity<List<ProductPriceDTO>> findPrices(@RequestBody @NotEmpty List<@NotNull UUID> productIds) {
         return ResponseEntity.ok(productService.findPrices(productIds));
     }
 
     @PutMapping("{id}")
     public ResponseEntity<ProductResponseDTO> update(
             @PathVariable UUID id,
-            @RequestBody ProductRequestDTO dto) {
+            @Valid @RequestBody ProductRequestDTO dto) {
         return ResponseEntity.ok(productService.update(id, dto));
     }
 

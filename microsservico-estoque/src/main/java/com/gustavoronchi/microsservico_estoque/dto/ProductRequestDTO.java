@@ -1,15 +1,25 @@
 package com.gustavoronchi.microsservico_estoque.dto;
 
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
+
 import java.math.BigDecimal;
 import java.util.UUID;
 
 public class ProductRequestDTO {
 
+    @NotBlank
     private String name;
     private String description;
+    @NotNull
+    @PositiveOrZero
     private BigDecimal price;
     private String imgUrl;
+    @NotNull
+    @PositiveOrZero
     private Integer quantityAvailable;
+    @NotNull
     private UUID categoryId;
 
     public ProductRequestDTO() {

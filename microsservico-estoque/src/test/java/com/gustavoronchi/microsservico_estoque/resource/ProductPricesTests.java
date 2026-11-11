@@ -16,6 +16,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -68,7 +69,16 @@ class ProductPricesTests {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"[]", "[null]", "null", "[\"invalid-uuid\"]", "{}"})
+    @ValueSource(strings = {"[]", "[null]", "[\"11111111-1111-1111-1111-111111111111\",null]"})
+    void rejectsEmptyListAndNullIdsWithBeanValidation(String body) throws Exception {
+        mvc.perform(post("/products/prices").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(result -> assertThat(result.getResolvedException())
+                        .isInstanceOf(HandlerMethodValidationException.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "[\"invalid-uuid\"]", "{}"})
     void rejectsInvalidInput(String body) throws Exception {
         mvc.perform(post("/products/prices").contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isBadRequest());

@@ -3,6 +3,7 @@ package com.gustavoronchi.microsservico_estoque.resource;
 import com.gustavoronchi.microsservico_estoque.dto.CategoryRequestDTO;
 import com.gustavoronchi.microsservico_estoque.dto.CategoryResponseDTO;
 import com.gustavoronchi.microsservico_estoque.service.CategoryService;
+import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
@@ -26,7 +27,7 @@ public class CategoryResource {
     }
 
     @PostMapping
-    public ResponseEntity<CategoryResponseDTO> create(@RequestBody CategoryRequestDTO dto) {
+    public ResponseEntity<CategoryResponseDTO> create(@Valid @RequestBody CategoryRequestDTO dto) {
         CategoryResponseDTO categoryResponseDTO = categoryService.create(dto);
 
         URI uri = ServletUriComponentsBuilder
