@@ -1,10 +1,16 @@
 package com.gustavoronchi.microsservico_pedido.dto;
 
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+
 import java.util.UUID;
 
 public class OrderItemRequestDTO {
 
+    @NotNull
     private UUID productId;
+    @NotNull
+    @Positive
     private Integer quantity;
 
     public OrderItemRequestDTO() {

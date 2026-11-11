@@ -5,6 +5,7 @@ import com.gustavoronchi.microsservico_pedido.dto.OrderResponseDTO;
 import com.gustavoronchi.microsservico_pedido.exception.InsufficientStockException;
 import com.gustavoronchi.microsservico_pedido.exception.IdempotencyConflictException;
 import com.gustavoronchi.microsservico_pedido.service.OrderService;
+import jakarta.validation.Valid;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
@@ -42,7 +43,7 @@ public class OrderResource {
     }
 
     @PostMapping
-    public ResponseEntity<OrderResponseDTO> createOrder(@RequestBody OrderRequestDTO orderRequestDTO,
+    public ResponseEntity<OrderResponseDTO> createOrder(@Valid @RequestBody OrderRequestDTO orderRequestDTO,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         OrderResponseDTO orderResponse = orderService.createOrder(orderRequestDTO, idempotencyKey);
 
