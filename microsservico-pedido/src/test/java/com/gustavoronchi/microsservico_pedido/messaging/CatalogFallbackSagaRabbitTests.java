@@ -11,6 +11,7 @@ import com.gustavoronchi.microsservico_pedido.dto.OrderRequestDTO;
 import com.gustavoronchi.microsservico_pedido.enums.StatusOrder;
 import com.gustavoronchi.microsservico_pedido.messaging.*;
 import com.gustavoronchi.microsservico_pedido.service.OrderService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -42,6 +43,7 @@ class CatalogFallbackSagaRabbitTests {
 
     private static final UUID PRODUCT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID CLIENT_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
+    private String orderCreatedQueue;
 
     @MockitoBean private StockClient stockClient;
     @org.springframework.beans.factory.annotation.Autowired private OrderService orderService;
@@ -59,7 +61,11 @@ class CatalogFallbackSagaRabbitTests {
         outbox.deleteAll();
         orders.deleteAll();
         catalog.deleteAll();
-        rabbit.execute(channel -> { channel.queuePurge(RabbitMQConfig.STOCK_ORDER_CREATED_QUEUE); return null; });
+        orderCreatedQueue = rabbit.execute(channel -> {
+            String queue = channel.queueDeclare("", false, true, false, null).getQueue();
+            channel.queueBind(queue, RabbitMQConfig.ORDER_CREATED_EXCHANGE, "");
+            return queue;
+        });
         catalog.saveAndFlush(new CatalogProduct(PRODUCT_ID, new BigDecimal("8.00"), 0, Instant.now()));
         when(stockClient.findPrices(org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new ResourceAccessException("Estoque indisponível"));
@@ -73,13 +79,13 @@ class CatalogFallbackSagaRabbitTests {
         var savedEvent = outbox.findAll().getFirst();
         assertThat(savedEvent.getExchange()).isEqualTo(RabbitMQConfig.ORDER_CREATED_EXCHANGE);
         relay.publishPending();
-        var published = rabbit.receive(RabbitMQConfig.STOCK_ORDER_CREATED_QUEUE, 5000);
+        var published = rabbit.receive(orderCreatedQueue, 5000);
         assertThat(published).isNotNull();
         var event = jsonMapper.readTree(new String(published.getBody(), java.nio.charset.StandardCharsets.UTF_8));
-        assertThat(event.get("eventId").asText()).isEqualTo(savedEvent.getEventId().toString());
-        assertThat(event.get("orderId").asText()).isEqualTo(response.getOrderId().toString());
+        assertThat(event.get("eventId").asString()).isEqualTo(savedEvent.getEventId().toString());
+        assertThat(event.get("orderId").asString()).isEqualTo(response.getOrderId().toString());
         assertThat(event.get("amount").decimalValue()).isEqualByComparingTo("16.00");
-        assertThat(event.get("items").get(0).get("productId").asText()).isEqualTo(PRODUCT_ID.toString());
+        assertThat(event.get("items").get(0).get("productId").asString()).isEqualTo(PRODUCT_ID.toString());
         assertThat(event.get("items").get(0).get("quantity").asInt()).isEqualTo(2);
 
         if (reservationPossible) {
@@ -95,5 +101,12 @@ class CatalogFallbackSagaRabbitTests {
         }
         assertThat(orders.findById(response.getOrderId()).orElseThrow().getTotalValue())
                 .isEqualByComparingTo("16.00");
+    }
+
+    @AfterEach
+    void removerOrderCreatedQueue() {
+        if (orderCreatedQueue != null) {
+            rabbit.execute(channel -> channel.queueDelete(orderCreatedQueue));
+        }
     }
 }
